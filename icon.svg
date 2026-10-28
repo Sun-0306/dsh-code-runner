@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Code Runner">
+  <defs>
+    <linearGradient id="dcr-panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22304A"/>
+      <stop offset="1" stop-color="#141B28"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="url(#dcr-panel)"/>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="none" stroke="#7FB4FF" stroke-opacity="0.28" stroke-width="1.5"/>
+  <path d="M17 23.5 27 32l-10 8.5" fill="none" stroke="#5EE1B4" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="32" y="36.5" width="16" height="4.6" rx="2.3" fill="#7FB4FF"/>
+  <circle cx="46" cy="19" r="4.2" fill="#FFC46B"/>
+</svg>

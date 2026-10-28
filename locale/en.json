@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Code Runner",
+    "description": "A sidebar panel that runs Python, R, Node.js and other scripts on this machine and streams their output live."
+  }
+}

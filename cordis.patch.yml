@@ -1,0 +1,9 @@
+# dsh-code-runner bundle patch: inserts the dual-face plugin row.
+#
+# The row is a bare plugin by package name. The node half (exports ".") runs in
+# the Host process and registers the /dsh-code-runner HTTP API; the `dsh.client`
+# declaration in package.json makes the browser half (exports "./client") load
+# in the Web GUI, where it contributes the sidebar row and the panel page.
+- insert:
+    - id: dsh-code-runner
+      name: dsh-code-runner
