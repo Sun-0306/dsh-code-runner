@@ -38,6 +38,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { buildXlsx, DEFAULT_SHEETS } from './dataset-fixtures.mjs'
+import { inflateRawSync } from 'node:zlib'
 
 // CONTRACT-V5: packs live under the DSH home by default; isolate them here.
 const VERIFY_STATE_DIR = path.join(os.tmpdir(), 'dsh-code-runner-verify-state-' + process.pid)
@@ -566,6 +568,30 @@ const PNG_1PX = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64',
 )
+// Minimal ZIP local-header reader: the report .docx writer stores media but
+// deflates the OOXML parts, so read word/document.xml by hand (no deps).
+function extractZipEntry(zipBuffer, entryName) {
+  const wanted = Buffer.from(entryName, 'utf8')
+  let offset = 0
+  while (offset + 30 <= zipBuffer.length) {
+    if (zipBuffer.readUInt32LE(offset) !== 0x04034b50) {
+      offset += 1
+      continue
+    }
+    const method = zipBuffer.readUInt16LE(offset + 8)
+    const compressedSize = zipBuffer.readUInt32LE(offset + 18)
+    const nameLength = zipBuffer.readUInt16LE(offset + 26)
+    const extraLength = zipBuffer.readUInt16LE(offset + 28)
+    const name = zipBuffer.subarray(offset + 30, offset + 30 + nameLength)
+    const dataStart = offset + 30 + nameLength + extraLength
+    if (name.equals(wanted)) {
+      const data = zipBuffer.subarray(dataStart, dataStart + compressedSize)
+      return method === 0 ? Buffer.from(data) : inflateRawSync(data)
+    }
+    offset = dataStart + compressedSize
+  }
+  return null
+}
 const tempDirs = []
 async function makeTempDir(prefix = 'dcr-verify-host-') {
   const dir = await mkdtemp(path.join(os.tmpdir(), prefix))
@@ -2294,6 +2320,200 @@ async function main() {
       assert(missingPlot.status === 200, `missing-plot export HTTP ${missingPlot.status}`, truncate(missingPlot.text))
       assert(missingPlot.json.plotFiles.length === 0, `missing plot was copied: ${JSON.stringify(missingPlot.json.plotFiles)}`)
       return 'bad-cwd / bad-path / unsupported-file; missing plot skipped'
+    })
+
+    await scenario('H99 under-code placement nests 统计图 under 源代码 (CONTRACT-V6 §1.2)', async () => {
+      const body = { ...exportBody, format: 'all', plotPlacement: 'under-code' }
+      const result = await postExport(body)
+      assert(result.status === 200, `HTTP ${result.status}`, truncate(result.text))
+      const json = result.json
+      assert(json.plotPlacement === 'under-code', `plotPlacement is ${JSON.stringify(json.plotPlacement)}`)
+      assert(json.include.code === true && json.include.plots === true, 'include flags changed')
+
+      const md = await readFile(json.reportPath, 'utf8')
+      const mdCode = md.indexOf('## 源代码：')
+      const mdPlots = md.indexOf('## 统计图：')
+      const mdOutput = md.indexOf('## 输出结果：')
+      assert(mdCode >= 0 && mdPlots >= 0 && mdOutput >= 0, 'report.md lacks a required section')
+      assert(mdCode < mdPlots && mdPlots < mdOutput, `report.md order is code=${mdCode} plots=${mdPlots} output=${mdOutput}`)
+      const mdPlotLink = md.indexOf('](plots/plot-001.png)')
+      assert(mdPlotLink > mdPlots && mdPlotLink < mdOutput, 'plot link is not between the code and the output sections')
+
+      const html = await readFile(json.htmlPath, 'utf8')
+      assert(html.includes('class="code-with-plots"'), 'report.html has no code-with-plots group')
+      assert(html.includes('codePlotsHeading'), 'report.html lacks the nested 统计图 heading')
+      assert(!html.includes('<section><h2>统计图：</h2>'), 'report.html still has a standalone plot section')
+      const htmlCode = html.indexOf('源代码：')
+      const htmlOutput = html.indexOf('输出结果：')
+      const htmlPlots = html.indexOf('统计图：')
+      assert(htmlCode < htmlPlots && htmlPlots < htmlOutput, 'report.html nested order is wrong')
+
+      const docxXml = extractZipEntry(await readFile(json.docxPath), 'word/document.xml')
+      assert(docxXml !== null, 'docx has no word/document.xml')
+      const xml = docxXml.toString('utf8')
+      const xmlCode = xml.indexOf('源代码：')
+      const xmlPlots = xml.indexOf('统计图：')
+      const xmlOutput = xml.indexOf('输出结果：')
+      assert(xmlCode >= 0 && xmlPlots >= 0 && xmlOutput >= 0, 'docx lacks a required heading')
+      assert(xmlCode < xmlPlots && xmlPlots < xmlOutput, 'docx paragraph order is wrong')
+      assert(xml.includes('w:val="Heading2"'), 'docx nested 统计图 heading is not Heading2')
+      const runJson = JSON.parse(await readFile(path.join(json.folder, 'run.json'), 'utf8'))
+      assert(runJson.plotPlacement === 'under-code', `run.json plotPlacement is ${JSON.stringify(runJson.plotPlacement)}`)
+      assert(runJson.reportVersion === 6, `run.json reportVersion is ${JSON.stringify(runJson.reportVersion)}`)
+      return `md/html/docx order code→plots→output, docx Heading2, run.json v6`
+    })
+
+    await scenario('H100 placement defaults + validation + no orphan charts (CONTRACT-V6 §1.2)', async () => {
+      const defaultExport = await postExport({ ...exportBody, format: 'md' })
+      assert(defaultExport.status === 200, `default export HTTP ${defaultExport.status}`, truncate(defaultExport.text))
+      assert(defaultExport.json.plotPlacement === 'section', 'omitted plotPlacement is not section')
+      const defaultMd = await readFile(defaultExport.json.reportPath, 'utf8')
+      const sectionPositions = ['## 源代码：', '## 输出结果：', '## 统计图：'].map((label) => defaultMd.indexOf(label))
+      assert(sectionPositions.every((position) => position >= 0), 'default report.md lacks a section')
+      assert(
+        sectionPositions[0] < sectionPositions[1] && sectionPositions[1] < sectionPositions[2],
+        'default report.md is not in the section order',
+      )
+      const invalid = await postExport({ ...exportBody, plotPlacement: 'inline' })
+      expectError(invalid, 400, 'bad-request')
+      const noCode = await postExport({
+        ...exportBody,
+        format: 'md',
+        include: { code: false, output: true, plots: true, summary: false },
+        plotPlacement: 'under-code',
+      })
+      assert(noCode.status === 200, `no-code export HTTP ${noCode.status}`, truncate(noCode.text))
+      assert(noCode.json.plotPlacement === 'section', 'charts stayed nested without a source section')
+      const noCodeMd = await readFile(noCode.json.reportPath, 'utf8')
+      assert(noCodeMd.indexOf('## 统计图：') > noCodeMd.indexOf('## 输出结果：'), 'orphan charts have no standalone section')
+      return 'default section order + 400 bad-request + under-code falls back without code'
+    })
+
+    /* ── v7 dataset preview (§1) ────────────────────────────────────────── */
+
+    const datasetBase = await makeTempDir()
+    const datasetXlsx = path.join(datasetBase, 'students.xlsx')
+    const datasetCsv = path.join(datasetBase, 'scores.csv')
+    const datasetSemicolon = path.join(datasetBase, 'semicolon.csv')
+    await writeFile(datasetXlsx, buildXlsx(DEFAULT_SHEETS))
+    await writeFile(datasetCsv, '姓名,分数,备注\n"张三",92,"a ""quote"", ok"\n李四,88,\n', 'utf8')
+    await writeFile(datasetSemicolon, 'a;b;c\n1;2;3\n4;5;6\n', 'utf8')
+    const assertStrictEqual = (actual, expected, message) => {
+      assert(actual === expected, message, `actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`)
+    }
+    const assertDeepEqual = (actual, expected, message) => {
+      assert(
+        JSON.stringify(actual) === JSON.stringify(expected),
+        message,
+        `actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`,
+      )
+    }
+    const postDataset = (body) =>
+      callPluginApi(harness, { method: 'POST', pathname: '/dsh-code-runner/api/dataset/preview', body })
+
+    await scenario('H101 xlsx dataset preview: sheets, typed columns, snippets (CONTRACT-V7 §1.1)', async () => {
+      const result = await postDataset({ path: datasetXlsx, language: 'r' })
+      assertStrictEqual(result.status, 200, `HTTP ${result.status}`, truncate(result.text))
+      const payload = result.json
+      assert(payload.ok === true, 'ok is not true')
+      assertDeepEqual(payload.sheets, ['成绩', '教师'], `sheets are ${JSON.stringify(payload.sheets)}`)
+      assertStrictEqual(payload.sheet, '成绩', 'first sheet was not selected')
+      assertStrictEqual(payload.header, true, 'header row was not detected')
+      assertDeepEqual(
+        payload.columns.map((column) => column.name),
+        ['姓名', '班级', '数学', '英语', '入学日期'],
+      )
+      assertDeepEqual(
+        payload.columns.map((column) => column.type),
+        ['string', 'string', 'number', 'number', 'date'],
+        'column types are wrong (dates should use the date style)',
+      )
+      assertDeepEqual(payload.rows[0], ['张三', 'A班', '92', '88', '2026-09-01'])
+      assertStrictEqual(payload.totalRows, 3, `totalRows is ${payload.totalRows}`)
+      assertStrictEqual(payload.variable, 'students', `variable is ${payload.variable}`)
+      assert(payload.snippets.r.includes('read_excel'), 'R snippet lacks read_excel')
+      assert(payload.snippets.python.includes('pd.read_excel'), 'python snippet lacks pd.read_excel')
+      assert(payload.snippets.matlab.includes('readtable'), 'matlab snippet lacks readtable')
+      assertStrictEqual(payload.import.language, 'r', 'requested import language was not echoed')
+      assert(payload.import.code.includes('library(readxl)'), 'R import code lacks library(readxl)')
+      assert(payload.import.code.includes('sheet = "成绩"'), 'R import code lacks the sheet argument')
+      return `${payload.sheets.length} sheets, ${payload.columns.length} columns, ${payload.totalRows} rows, date column detected`
+    })
+
+    await scenario('H102 xlsx sheet switch + no-header + preview truncation (CONTRACT-V7 §1.1)', async () => {
+      const teacher = await postDataset({ path: datasetXlsx, sheet: '教师', language: 'matlab' })
+      assertStrictEqual(teacher.status, 200, `HTTP ${teacher.status}`, truncate(teacher.text))
+      assertStrictEqual(teacher.json.sheet, '教师', 'requested sheet was not selected')
+      assertStrictEqual(teacher.json.rows[0][0], 'Wang', `teacher row is ${JSON.stringify(teacher.json.rows[0])}`)
+      assert(teacher.json.import.code.includes("'Sheet'"), 'matlab import code lacks the Sheet name-value pair')
+      const noHeader = await postDataset({ path: datasetXlsx, header: false })
+      assertStrictEqual(noHeader.status, 200, `header:false HTTP ${noHeader.status}`, truncate(noHeader.text))
+      assertStrictEqual(noHeader.json.header, false, 'header:false was ignored')
+      assertDeepEqual(
+        noHeader.json.columns.map((column) => column.name),
+        ['A', 'B', 'C', 'D', 'E'],
+        'no-header columns should fall back to Excel letters',
+      )
+      assertStrictEqual(noHeader.json.totalRows, 4, 'no-header totalRows should include the title row')
+      const oneRow = await postDataset({ path: datasetXlsx, maxRows: 1 })
+      assertStrictEqual(oneRow.status, 200, `maxRows:1 HTTP ${oneRow.status}`, truncate(oneRow.text))
+      assertStrictEqual(oneRow.json.rows.length, 1, 'maxRows did not cap the preview')
+      assertStrictEqual(oneRow.json.truncated, true, 'truncated flag is not set')
+      const unknownSheet = await postDataset({ path: datasetXlsx, sheet: 'nope' })
+      assertStrictEqual(unknownSheet.status, 400, `unknown sheet HTTP ${unknownSheet.status}`, truncate(unknownSheet.text))
+      return 'sheet switch + Excel-letter no-header fallback + maxRows truncation + unknown sheet error'
+    })
+
+    await scenario('H103 csv dataset preview: quotes, encoding, delimiter, header toggle (CONTRACT-V7 §1.1)', async () => {
+      const result = await postDataset({ path: datasetCsv, language: 'python' })
+      assertStrictEqual(result.status, 200, `HTTP ${result.status}`, truncate(result.text))
+      const payload = result.json
+      assertStrictEqual(payload.kind, 'csv', `kind is ${payload.kind}`)
+      assertStrictEqual(payload.delimiter, ',', 'comma delimiter was not detected')
+      assertStrictEqual(payload.encoding, 'utf-8', `encoding is ${payload.encoding}`)
+      assertStrictEqual(payload.header, true, 'header row was not detected')
+      assertDeepEqual(payload.rows[0], ['张三', '92', 'a "quote", ok'], 'quoted csv cell was mangled')
+      assertStrictEqual(payload.totalRows, 2, `totalRows is ${payload.totalRows}`)
+      assert(payload.import.code.includes('pd.read_csv'), 'python import code lacks pd.read_csv')
+      const noHeader = await postDataset({ path: datasetCsv, header: false })
+      assertStrictEqual(noHeader.json.header, false, 'header:false was ignored')
+      assertDeepEqual(
+        noHeader.json.columns.map((column) => column.name),
+        ['V1', 'V2', 'V3'],
+      )
+      assertStrictEqual(noHeader.json.totalRows, 3, 'header:false totalRows should include the title row')
+      const semicolon = await postDataset({ path: datasetSemicolon, delimiter: ';' })
+      assertStrictEqual(semicolon.status, 200, `semicolon HTTP ${semicolon.status}`, truncate(semicolon.text))
+      assertStrictEqual(semicolon.json.delimiter, ';', 'explicit delimiter was not applied')
+      assertDeepEqual(semicolon.json.rows[0], ['1', '2', '3'])
+      const autoSemicolon = await postDataset({ path: datasetSemicolon })
+      assertStrictEqual(autoSemicolon.json.delimiter, ';', 'semicolon was not auto-detected')
+      return 'quoted cells + UTF-8 + auto/explicit delimiter + header toggle'
+    })
+
+    await scenario('H104 dataset preview validation + token gate (CONTRACT-V7 §1.1)', async () => {
+      const relative = await postDataset({ path: 'students.xlsx' })
+      expectError(relative, 400, 'bad-path')
+      const missing = await postDataset({ path: path.join(datasetBase, 'missing.xlsx') })
+      expectError(missing, 404, 'not-found')
+      const notesDocx = path.join(datasetBase, 'notes.docx')
+      await writeFile(notesDocx, 'not a dataset')
+      const unsupported = await postDataset({ path: notesDocx })
+      expectError(unsupported, 415, 'unsupported-file')
+      const legacy = path.join(datasetBase, 'legacy.xls')
+      await writeFile(legacy, 'old binary')
+      const legacyResult = await postDataset({ path: legacy })
+      expectError(legacyResult, 415, 'unsupported-file')
+      const badDelimiter = await postDataset({ path: datasetCsv, delimiter: '::' })
+      expectError(badDelimiter, 400, 'bad-request')
+      const anonymous = await callPluginApi(harness, {
+        method: 'POST',
+        pathname: '/dsh-code-runner/api/dataset/preview',
+        body: { path: datasetXlsx },
+        token: null,
+      })
+      expectError(anonymous, 401, 'unauthorized')
+      return 'bad-path / not-found / unsupported-file / legacy .xls / bad delimiter / 401'
     })
 
     /* ── save-plots (§1.4) ──────────────────────────────────────────────── */

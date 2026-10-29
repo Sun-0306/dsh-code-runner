@@ -40,6 +40,7 @@ const API_PACKS_RESCAN = `${ROUTE_PREFIX}/api/packs/rescan`
 const API_EXPLAIN = `${ROUTE_PREFIX}/api/explain`
 const API_EXPORT = `${ROUTE_PREFIX}/api/export`
 const API_SAVE_PLOTS = `${ROUTE_PREFIX}/api/save-plots`
+const API_DATASET = `${ROUTE_PREFIX}/api/dataset/preview`
 const TOKEN_HEADER = 'x-dsh-code-runner-token'
 const TOKEN_GLOBAL = '__DSH_CODE_RUNNER__'
 
@@ -68,6 +69,11 @@ const LIMITS = Object.freeze({
   artifactCwdWindowMs: 2_000,
   // v2 client diagnostics ring buffer (CONTRACT-V2.md §1.12)
   diagMaxEvents: 100,
+  // v7 dataset preview (CONTRACT-V7.md §1.2)
+  datasetMaxBytes: 64 * 1024 * 1024,
+  datasetPreviewRows: 20,
+  datasetPreviewCols: 200,
+  datasetMaxScanRows: 500_000,
   // v3 explain / export / save-plots (CONTRACT-V3.md §1.2–§1.5)
   explainMaxChars: 20_000,
   explainTimeoutMs: 90_000,
@@ -363,6 +369,8 @@ function parseExplainText(rawText) {
 
 const REPORT_DIR_NAME = 'dsh-code-runner-reports'
 const REPORT_TRUNCATED_MARKER = '…（已截断）'
+// CONTRACT-V6 §1.2: where the charts go in the exported report.
+const PLOT_PLACEMENTS = ['section', 'under-code']
 
 function padTwo(value) {
   return String(value).padStart(2, '0')
@@ -2484,15 +2492,22 @@ export function apply(ctx) {
       .map(([label, value]) => `<li><strong>${htmlEscape(label)}：</strong>${htmlEscape(value)}</li>`)
       .join('')
     const include = context.include || { code: true, output: true, plots: true, summary: true }
+    // CONTRACT-V6 §1.2: under-code keeps the charts inside the source-code section.
+    const underSourcePlots =
+      context.plotPlacement === 'under-code' && include.code && include.plots && plotMarkup.length > 0
     const summaryMarkup = include.summary && context.summary
       ? `<section><h2>AI 解读：</h2><p class="summary">${htmlEscape(context.summary)}</p></section>`
       : ''
+    const figuresMarkup =
+      plotMarkup.length > 0 ? `<div class="plots">${plotMarkup.join('')}</div>` : ''
     const plotsMarkup =
-      include.plots && plotMarkup.length > 0
-        ? `<section><h2>统计图：</h2><div class="plots">${plotMarkup.join('')}</div></section>`
+      include.plots && plotMarkup.length > 0 && !underSourcePlots
+        ? `<section><h2>统计图：</h2>${figuresMarkup}</section>`
         : ''
     const codeMarkup = include.code
-      ? `<section><h2>源代码：</h2><pre class="code">${htmlEscape(context.codeText)}</pre></section>`
+      ? `<section${underSourcePlots ? ' class="code-with-plots"' : ''}><h2>源代码：</h2><pre class="code">${htmlEscape(context.codeText)}</pre>${
+          underSourcePlots ? `<h3 class="codePlotsHeading">统计图：</h3>${figuresMarkup}` : ''
+        }</section>`
       : ''
     const outputMarkup = include.output
       ? `<section><h2>输出结果：</h2><pre class="output">${htmlEscape(context.outputText)}</pre></section>`
@@ -2516,6 +2531,8 @@ h2{font-size:16px;margin:28px 0 12px;padding-bottom:6px;border-bottom:1px solid 
 pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow:auto;max-height:560px;white-space:pre-wrap;word-break:break-word;font:12.5px/1.55 "SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;}
 .summary{white-space:pre-wrap;margin:0;}
 .plots{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;}
+.code-with-plots pre{margin-bottom:0;}
+.code-with-plots .codePlotsHeading{font-size:15px;margin:22px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--border);font-weight:600;}
 figure{margin:0;border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--surface);}
 figure img{display:block;width:100%;height:auto;border-radius:4px;}
 figcaption{color:var(--muted);font-size:12px;margin-top:8px;word-break:break-all;}
@@ -2699,16 +2716,15 @@ ${summaryMarkup}
     body.push(docxParagraph('Title', context.title))
     body.push(docxParagraph('Normal', context.metaLine))
     const include = context.include
-    if (include.code) {
-      body.push(docxParagraph('Heading1', '源代码：'))
-      body.push(...docxCodeParagraphs(context.codeText))
-    }
-    if (include.output) {
-      body.push(docxParagraph('Heading1', '输出结果：'))
-      body.push(...docxCodeParagraphs(context.outputText))
-    }
-    if (include.plots && context.plots.length > 0) {
-      body.push(docxParagraph('Heading1', '统计图：'))
+    // CONTRACT-V6 §1.2: `under-code` nests 统计图： under 源代码： (Heading2);
+    // otherwise the charts keep their own top-level section (Heading1).
+    const underSourcePlots =
+      context.plotPlacement === 'under-code' &&
+      include.code &&
+      include.plots &&
+      context.plots.length > 0
+    const appendPlotBlocks = async (headingStyle) => {
+      body.push(docxParagraph(headingStyle, '统计图：'))
       let imageIndex = 0
       for (const plot of context.plots) {
         let bytes
@@ -2724,6 +2740,18 @@ ${summaryMarkup}
         body.push(docxImageParagraph(relId, imageIndex, plot.name, bytes))
         body.push(docxParagraph('Caption', `图 ${imageIndex}：${plot.name}`))
       }
+    }
+    if (include.code) {
+      body.push(docxParagraph('Heading1', '源代码：'))
+      body.push(...docxCodeParagraphs(context.codeText))
+      if (underSourcePlots) await appendPlotBlocks('Heading2')
+    }
+    if (include.output) {
+      body.push(docxParagraph('Heading1', '输出结果：'))
+      body.push(...docxCodeParagraphs(context.outputText))
+    }
+    if (include.plots && context.plots.length > 0 && !underSourcePlots) {
+      await appendPlotBlocks('Heading1')
     }
     if (include.summary && context.summary) {
       body.push(docxParagraph('Heading1', 'AI 解读：'))
@@ -2750,6 +2778,9 @@ ${summaryMarkup}
       '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>' +
       '<w:pPr><w:spacing w:before="240" w:after="120"/><w:outlineLvl w:val="0"/></w:pPr>' +
       '<w:rPr><w:b/><w:sz w:val="28"/><w:szCs w:val="28"/></w:rPr></w:style>' +
+      '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>' +
+      '<w:pPr><w:spacing w:before="200" w:after="100"/><w:outlineLvl w:val="1"/></w:pPr>' +
+      '<w:rPr><w:b/><w:sz w:val="24"/><w:szCs w:val="24"/></w:rPr></w:style>' +
       '<w:style w:type="paragraph" w:styleId="Code"><w:name w:val="Code"/><w:basedOn w:val="Normal"/>' +
       '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/><w:jc w:val="left"/></w:pPr>' +
       '<w:rPr><w:rFonts w:ascii="Menlo" w:hAnsi="Menlo" w:eastAsia="PingFang SC"/>' +
@@ -2868,6 +2899,15 @@ ${summaryMarkup}
       plots: includeInput.plots !== false,
       summary: includeInput.summary !== false,
     }
+    // CONTRACT-V6 §1.2: the caller may ask for the charts to sit right under the
+    // source code instead of forming their own 统计图： section.
+    const placementInput =
+      request.plotPlacement === undefined || request.plotPlacement === null
+        ? 'section'
+        : request.plotPlacement
+    if (typeof placementInput !== 'string' || PLOT_PLACEMENTS.indexOf(placementInput) < 0) {
+      throw new HttpError(400, 'bad-request', 'plotPlacement must be one of section, under-code')
+    }
     const requestedStem =
       typeof request.name === 'string' && request.name.trim() !== ''
         ? request.name
@@ -2944,6 +2984,10 @@ ${summaryMarkup}
       }
     }
     const plotFiles = copiedPlots.map((plot) => plot.relative)
+    // The requested nesting is only honoured when there really is a code block to
+    // nest under; otherwise the charts fall back to their own section (no orphans).
+    const plotPlacement =
+      placementInput === 'under-code' && include.code && copiedPlots.length > 0 ? 'under-code' : 'section'
 
     // 3. Sections (CONTRACT-V4 §1.4): 源代码：/输出结果：/统计图： (+ optional AI 解读).
     const codeTruncated = truncateUtf8(codeSource, LIMITS.codeMaxBytes)
@@ -2970,6 +3014,12 @@ ${summaryMarkup}
       markdown.push('')
       markdown.push(fencedBlock(codeText, languageFence(language.id)))
       markdown.push('')
+      if (plotPlacement === 'under-code') {
+        markdown.push('## 统计图：')
+        markdown.push('')
+        for (const plot of copiedPlots) markdown.push(`![${plot.name}](${plot.relative})`)
+        markdown.push('')
+      }
     }
     if (include.output) {
       markdown.push('## 输出结果：')
@@ -2977,7 +3027,7 @@ ${summaryMarkup}
       markdown.push(fencedBlock(outputText, 'text'))
       markdown.push('')
     }
-    if (include.plots && copiedPlots.length > 0) {
+    if (include.plots && copiedPlots.length > 0 && plotPlacement !== 'under-code') {
       markdown.push('## 统计图：')
       markdown.push('')
       for (const plot of copiedPlots) markdown.push(`![${plot.name}](${plot.relative})`)
@@ -3019,6 +3069,7 @@ ${summaryMarkup}
           outputText,
           summary,
           include,
+          plotPlacement,
           plots: copiedPlots,
         })
         await fsp.writeFile(htmlPath, html, 'utf8')
@@ -3029,6 +3080,7 @@ ${summaryMarkup}
           title,
           metaLine,
           include,
+          plotPlacement,
           codeText,
           outputText,
           summary,
@@ -3040,10 +3092,11 @@ ${summaryMarkup}
       // 4. run.json: sanitized metadata only (no code/output bodies).
       const runMeta = {
         plugin: 'dsh-code-runner',
-        reportVersion: 4,
+        reportVersion: 6,
         baseName,
         format: formatInput,
         include,
+        plotPlacement,
         language: language.id,
         mode,
         file,
@@ -3068,6 +3121,7 @@ ${summaryMarkup}
       baseName,
       format: formatInput,
       include,
+      plotPlacement,
       reportPath: mdPath,
       htmlPath,
       docxPath,
@@ -3158,6 +3212,536 @@ ${summaryMarkup}
   }
 
   /* ── v5: language packs (opt-in, detection-gated) — CONTRACT-V5 §1.1–1.3 ── */
+
+  /* ── v7: dataset preview + import code (CONTRACT-V7.md §1) ────────────────── */
+
+  const DATASET_EXTENSIONS = new Set(['xlsx', 'csv', 'tsv', 'txt'])
+  const DATASET_DELIMITERS = new Set([',', ';', '|', '\t'])
+  const DATASET_REJECTED_EXTENSIONS = new Set(['xls', 'xlsb', 'ods'])
+  const XLSX_BUILTIN_DATE_FORMATS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46, 47])
+
+  /** Read every entry of a ZIP container (stored or deflated), keyed by full name. */
+  function readZipEntries(buffer) {
+    const entries = new Map()
+    let eocd = -1
+    const scanStart = Math.max(0, buffer.length - 65_557)
+    for (let offset = buffer.length - 22; offset >= scanStart; offset -= 1) {
+      if (buffer.readUInt32LE(offset) === 0x06054b50) {
+        eocd = offset
+        break
+      }
+    }
+    if (eocd < 0) return entries
+    const count = buffer.readUInt16LE(eocd + 10)
+    let pointer = buffer.readUInt32LE(eocd + 16)
+    for (let index = 0; index < count; index += 1) {
+      if (pointer + 46 > buffer.length || buffer.readUInt32LE(pointer) !== 0x02014b50) break
+      const method = buffer.readUInt16LE(pointer + 10)
+      const compressedSize = buffer.readUInt32LE(pointer + 20)
+      const nameLength = buffer.readUInt16LE(pointer + 28)
+      const extraLength = buffer.readUInt16LE(pointer + 30)
+      const commentLength = buffer.readUInt16LE(pointer + 32)
+      const localOffset = buffer.readUInt32LE(pointer + 42)
+      const entryName = buffer.toString('utf8', pointer + 46, pointer + 46 + nameLength)
+      if (localOffset + 30 <= buffer.length && buffer.readUInt32LE(localOffset) === 0x04034b50) {
+        const localNameLength = buffer.readUInt16LE(localOffset + 26)
+        const localExtraLength = buffer.readUInt16LE(localOffset + 28)
+        const dataStart = localOffset + 30 + localNameLength + localExtraLength
+        entries.set(entryName, { method, data: buffer.subarray(dataStart, dataStart + compressedSize) })
+      }
+      pointer += 46 + nameLength + extraLength + commentLength
+    }
+    return entries
+  }
+
+  function zipEntryText(entries, entryName) {
+    const entry = entries.get(entryName)
+    if (!entry) return null
+    try {
+      const bytes = entry.method === 0 ? entry.data : zlib.inflateRawSync(entry.data)
+      return bytes.toString('utf8')
+    } catch {
+      return null
+    }
+  }
+
+  function xmlDecode(text) {
+    return String(text ?? '')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/&amp;/g, '&')
+      .replace(/&#(\d+);/g, (match, code) => String.fromCodePoint(Number(code)))
+      .replace(/&#x([0-9a-fA-F]+);/g, (match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+  }
+
+  function xlsxAttributes(tag) {
+    const attributes = {}
+    for (const match of tag.matchAll(/([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*"([^"]*)"/g)) {
+      attributes[match[1]] = xmlDecode(match[2])
+    }
+    return attributes
+  }
+
+  function excelColumnIndex(reference) {
+    let index = 0
+    let sawLetter = false
+    for (const char of String(reference ?? '')) {
+      const code = char.charCodeAt(0)
+      if (code < 65 || code > 90) break
+      sawLetter = true
+      index = index * 26 + (code - 64)
+    }
+    return sawLetter ? index - 1 : -1
+  }
+
+  function excelSerialToIso(serial) {
+    const value = Number(serial)
+    if (!Number.isFinite(value)) return null
+    const date = new Date(Math.round((value - 25569) * 86_400_000))
+    if (Number.isNaN(date.getTime())) return null
+    const pad = (part) => String(part).padStart(2, '0')
+    const day = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+    const hasTime = Math.abs(value - Math.floor(value)) > 0.00001
+    if (!hasTime) return day
+    return `${day} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`
+  }
+
+  function xlsxDateStyleIndexes(stylesXml) {
+    const indexes = new Set()
+    if (!stylesXml) return indexes
+    const custom = new Set()
+    for (const match of stylesXml.matchAll(/<numFmt\b[^>]*\/?>/g)) {
+      const attributes = xlsxAttributes(match[0])
+      const formatId = Number(attributes.numFmtId)
+      const formatCode = String(attributes.formatCode ?? '')
+      if (!Number.isInteger(formatId)) continue
+      const stripped = formatCode.replace(/\[[^\]]*\]/g, '').replace(/"[^"]*"/g, '')
+      if (/[dmyhs]/i.test(stripped) && stripped.replace(/[^A-Za-z0-9#?.,;:\/@\s-]/g, '') !== '') {
+        custom.add(formatId)
+      }
+    }
+    const cellXfs = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)
+    if (!cellXfs) return indexes
+    const formatIds = []
+    for (const match of cellXfs[1].matchAll(/<xf\b[^>]*\/?>/g)) {
+      const attributes = xlsxAttributes(match[0])
+      formatIds.push(Number(attributes.numFmtId) || 0)
+    }
+    formatIds.forEach((formatId, index) => {
+      if (XLSX_BUILTIN_DATE_FORMATS.has(formatId) || custom.has(formatId)) indexes.add(index)
+    })
+    return indexes
+  }
+
+  function parseSharedStrings(xml) {
+    if (!xml) return []
+    const strings = []
+    for (const match of xml.matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
+      let text = ''
+      for (const part of match[1].matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)) text += part[1]
+      strings.push(xmlDecode(text))
+    }
+    return strings
+  }
+
+  function xlsxCellValue(attributes, innerXml, context) {
+    const type = attributes.t ?? ''
+    const raw = (innerXml.match(/<v>([\s\S]*?)<\/v>/) ?? [])[1]
+    if (type === 'inlineStr' || type === 'str') {
+      let text = ''
+      if (innerXml.includes('<is>')) {
+        for (const part of innerXml.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)) text += part[1]
+      }
+      if (text === '' && raw !== undefined) text = raw
+      const decoded = xmlDecode(text)
+      return decoded === '' ? { text: '', type: 'empty' } : { text: decoded, type: 'string' }
+    }
+    if (type === 's') {
+      const index = Number(raw)
+      const value = Number.isInteger(index) ? context.shared[index] ?? '' : ''
+      return value === '' ? { text: '', type: 'empty' } : { text: value, type: 'string' }
+    }
+    if (type === 'b') {
+      const flag = String(raw ?? '').trim()
+      if (flag === '') return { text: '', type: 'empty' }
+      return { text: flag === '1' ? 'TRUE' : 'FALSE', type: 'boolean' }
+    }
+    if (type === 'e') {
+      const value = xmlDecode(String(raw ?? '').trim())
+      return value === '' ? { text: '', type: 'empty' } : { text: value, type: 'string' }
+    }
+    const numeric = Number(String(raw ?? '').trim())
+    if (raw === undefined || String(raw).trim() === '' || !Number.isFinite(numeric)) {
+      return { text: '', type: 'empty' }
+    }
+    const styleIndex = Number(attributes.s)
+    if (Number.isInteger(styleIndex) && context.dateStyles.has(styleIndex)) {
+      const iso = excelSerialToIso(numeric)
+      if (iso !== null) return { text: iso, type: 'date' }
+    }
+    return { text: String(numeric), type: 'number' }
+  }
+
+  function parseWorksheetRows(sheetXml, options) {
+    const rows = []
+    let scanned = 0
+    for (const rowMatch of sheetXml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+      const cells = []
+      for (const cellMatch of rowMatch[1].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+        const attributes = xlsxAttributes(cellMatch[1])
+        const columnIndex = excelColumnIndex(attributes.r)
+        const cell = xlsxCellValue(attributes, cellMatch[2], options)
+        const target = columnIndex >= 0 ? columnIndex : cells.length
+        if (target >= options.maxColumns) continue
+        while (cells.length < target) cells.push({ text: '', type: 'empty' })
+        cells[target] = cell
+      }
+      scanned += 1
+      if (rows.length < options.keepRows) rows.push(cells)
+      if (scanned >= options.maxScanRows) break
+    }
+    return { rows, scanned }
+  }
+
+  async function readXlsxTable(buffer, options) {
+    const entries = readZipEntries(buffer)
+    const workbookXml = zipEntryText(entries, 'xl/workbook.xml')
+    if (!workbookXml) throw new Error('the file is not a readable .xlsx workbook')
+    const relsXml = zipEntryText(entries, 'xl/_rels/workbook.xml.rels') ?? ''
+    const relTargets = new Map()
+    for (const match of relsXml.matchAll(/<Relationship\b[^>]*\/?>/g)) {
+      const attributes = xlsxAttributes(match[0])
+      if (attributes.Id && attributes.Target) relTargets.set(attributes.Id, attributes.Target)
+    }
+    const sheets = []
+    for (const match of workbookXml.matchAll(/<sheet\b[^>]*\/?>/g)) {
+      const attributes = xlsxAttributes(match[0])
+      const name = attributes.name
+      if (typeof name !== 'string' || name === '') continue
+      const relationshipId = attributes['r:id'] ?? attributes.id
+      sheets.push({ name, target: relTargets.get(relationshipId) ?? null })
+    }
+    if (sheets.length === 0) throw new Error('the workbook has no sheets')
+    const requested = options.sheet === null ? null : String(options.sheet)
+    const selected = requested === null ? sheets[0] : sheets.find((sheet) => sheet.name === requested)
+    if (!selected) throw new Error(`no sheet named "${requested}" in this workbook`)
+    const candidates = []
+    if (selected.target) {
+      const target = String(selected.target)
+      if (target.startsWith('/')) candidates.push(target.slice(1))
+      else candidates.push(`xl/${target.replace(/^\.\//, '')}`)
+    }
+    const sheetIndex = sheets.indexOf(selected) + 1
+    candidates.push(`xl/worksheets/sheet${sheetIndex}.xml`)
+    let sheetXml = null
+    for (const candidate of candidates) {
+      sheetXml = zipEntryText(entries, candidate)
+      if (sheetXml !== null) break
+    }
+    if (sheetXml === null) throw new Error('the selected sheet could not be read')
+    const shared = parseSharedStrings(zipEntryText(entries, 'xl/sharedStrings.xml'))
+    const dateStyles = xlsxDateStyleIndexes(zipEntryText(entries, 'xl/styles.xml'))
+    const scanned = parseWorksheetRows(sheetXml, {
+      shared,
+      dateStyles,
+      keepRows: options.maxRows + 2,
+      maxScanRows: LIMITS.datasetMaxScanRows,
+      maxColumns: LIMITS.datasetPreviewCols,
+    })
+    return { sheets: sheets.map((sheet) => sheet.name), sheet: selected.name, rawRows: scanned.rows, scannedRows: scanned.scanned, totalRows: scanned.scanned }
+  }
+
+  function decodeDatasetText(buffer) {
+    try {
+      return { text: new TextDecoder('utf-8', { fatal: true }).decode(buffer), encoding: 'utf-8' }
+    } catch {
+      try {
+        return { text: new TextDecoder('gbk').decode(buffer), encoding: 'gbk' }
+      } catch {
+        return { text: buffer.toString('utf8'), encoding: 'utf-8' }
+      }
+    }
+  }
+
+  function detectDatasetDelimiter(text, extension) {
+    if (extension === 'tsv') return '\t'
+    const lines = text.split(/\r?\n/).filter((line) => line.trim() !== '').slice(0, 5)
+    if (lines.length === 0) return ','
+    const candidates = [',', ';', '\t', '|']
+    let best = ','
+    let bestScore = -1
+    for (const candidate of candidates) {
+      const counts = lines.map((line) => line.split(candidate).length - 1)
+      if (counts.every((count) => count === counts[0]) && counts[0] > 0) {
+        if (counts[0] > bestScore) {
+          bestScore = counts[0]
+          best = candidate
+        }
+      }
+    }
+    return best
+  }
+
+  function classifyDelimitedCell(text) {
+    const value = String(text ?? '').trim()
+    if (value === '') return { text: '', type: 'empty' }
+    if (/^(TRUE|FALSE|true|false)$/.test(value)) return { text: value.toUpperCase(), type: 'boolean' }
+    if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(value)) return { text: value, type: 'number' }
+    if (/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(value)) return { text: value, type: 'date' }
+    return { text: value, type: 'string' }
+  }
+
+  function parseDelimitedRows(text, delimiter, maxRows) {
+    const keepRows = maxRows + 1
+    const rows = []
+    let totalRows = 0
+    let row = []
+    let field = ''
+    let quoted = false
+    let sawAny = false
+    const pushRow = () => {
+      row.push(field)
+      field = ''
+      const cells = row.map((cell) => classifyDelimitedCell(cell))
+      row = []
+      if (cells.every((cell) => cell.text === '')) return
+      totalRows += 1
+      if (rows.length < keepRows) rows.push(cells)
+    }
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index]
+      sawAny = true
+      if (quoted) {
+        if (char === '"') {
+          if (text[index + 1] === '"') {
+            field += '"'
+            index += 1
+          } else {
+            quoted = false
+          }
+        } else {
+          field += char
+        }
+        continue
+      }
+      if (char === '"') {
+        quoted = true
+        continue
+      }
+      if (char === delimiter) {
+        row.push(field)
+        field = ''
+        continue
+      }
+      if (char === '\n') {
+        pushRow()
+        if (totalRows > LIMITS.datasetMaxScanRows) break
+        continue
+      }
+      if (char === '\r') continue
+      field += char
+    }
+    if (sawAny && (field !== '' || row.length > 0)) pushRow()
+    return { rows, totalRows }
+  }
+
+  function detectHeaderRow(rawRows) {
+    if (rawRows.length === 0) return false
+    const first = rawRows[0]
+    if (first.length === 0) return false
+    if (!first.every((cell) => cell.type === 'string' && cell.text !== '')) return false
+    const names = new Set(first.map((cell) => cell.text))
+    if (names.size !== first.length) return false
+    return rawRows.length > 1
+  }
+
+  function inferColumnType(cells) {
+    const types = new Set(cells.map((cell) => cell.type).filter((type) => type !== 'empty'))
+    if (types.size === 0) return 'empty'
+    if (types.size === 1) return [...types][0]
+    if (types.has('date') && !types.has('string')) return 'date'
+    if (types.has('number') && !types.has('string') && !types.has('date')) return 'number'
+    if (types.has('boolean') && !types.has('string')) return 'boolean'
+    return 'string'
+  }
+
+  function buildDatasetTable(rawRows, options) {
+    const width = rawRows.reduce((max, row) => Math.max(max, row.length), 0)
+    const columnCount = Math.min(width, LIMITS.datasetPreviewCols)
+    let header = options.header
+    if (header === undefined) header = detectHeaderRow(rawRows)
+    const headerRow = header ? rawRows[0] : null
+    const dataRows = header ? rawRows.slice(1) : rawRows
+    const usedNames = new Set()
+    const columns = []
+    for (let index = 0; index < columnCount; index += 1) {
+      let name = headerRow && headerRow[index] ? headerRow[index].text : options.defaultColumnName(index)
+      if (name === '') name = options.defaultColumnName(index)
+      if (usedNames.has(name)) {
+        let suffix = 2
+        while (usedNames.has(`${name}_${suffix}`)) suffix += 1
+        name = `${name}_${suffix}`
+      }
+      usedNames.add(name)
+      columns.push({ index, name, type: inferColumnType(dataRows.map((row) => row[index] ?? { text: '', type: 'empty' })) })
+    }
+    const previewRows = dataRows.slice(0, options.maxRows).map((row) =>
+      columns.map((column) => String((row[column.index] ?? { text: '' }).text ?? '')),
+    )
+    const totalRows = header ? Math.max(0, rawRows.length - 1) : rawRows.length
+    return {
+      header,
+      columns,
+      rows: previewRows,
+      totalRows,
+      truncated: totalRows > previewRows.length,
+      truncatedColumns: width > columnCount,
+    }
+  }
+
+  function datasetVariableName(filePath) {
+    const stem = path.basename(String(filePath), path.extname(String(filePath)))
+    let name = stem.replace(/[^A-Za-z0-9_]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '')
+    if (name === '') name = 'data'
+    if (/^[0-9]/.test(name)) name = `data_${name}`
+    return name
+  }
+
+  function datasetStringLiteral(value) {
+    return `"${String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+  }
+
+  function buildDatasetSnippets(info) {
+    const variable = datasetVariableName(info.path)
+    const file = datasetStringLiteral(info.path)
+    const sheet = info.sheet ? datasetStringLiteral(info.sheet) : null
+    const separator = info.delimiter && info.delimiter !== ',' ? datasetStringLiteral(info.delimiter) : null
+    const snippets = {}
+    if (info.kind === 'xlsx') {
+      snippets.r = `library(readxl)\n${variable} <- read_excel(${file}${sheet ? `, sheet = ${sheet}` : ''})`
+      snippets.python = `import pandas as pd\n${variable} = pd.read_excel(${file}${sheet ? `, sheet_name=${sheet}` : ''})`
+      snippets.matlab = `${variable} = readtable(${file}${sheet ? `, 'Sheet', ${sheet}` : ''});`
+    } else if (info.kind === 'csv' || info.kind === 'tsv' || info.kind === 'txt') {
+      const sep = separator ? `, sep = ${separator}` : ''
+      snippets.r = info.kind === 'tsv'
+        ? `${variable} <- read.delim(${file}, fileEncoding = "UTF-8")`
+        : `${variable} <- read.table(${file}, header = TRUE, sep = ${separator ?? '","'}, fileEncoding = "UTF-8")`
+      snippets.python = `import pandas as pd\n${variable} = pd.read_csv(${file}${sep})`
+      snippets.matlab = `${variable} = readtable(${file});`
+    }
+    return { variable, snippets }
+  }
+
+  async function handleDatasetPreview({ body }) {
+    const request = requireObjectBody(body)
+    const filePath = request.path
+    if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+      throw new HttpError(400, 'bad-path', 'path must be an absolute file path')
+    }
+    let fileStat
+    try {
+      fileStat = await fsp.stat(filePath)
+    } catch {
+      throw new HttpError(404, 'not-found', `dataset not found: ${filePath}`)
+    }
+    if (!fileStat.isFile()) throw new HttpError(404, 'not-found', `not a regular file: ${filePath}`)
+    if (fileStat.size > LIMITS.datasetMaxBytes) {
+      throw new HttpError(413, 'too-large', `dataset exceeds ${LIMITS.datasetMaxBytes} bytes`)
+    }
+    const extension = pathExtension(filePath)
+    if (DATASET_REJECTED_EXTENSIONS.has(extension)) {
+      throw new HttpError(
+        415,
+        'unsupported-file',
+        `legacy .${extension} files are not supported — save the sheet as .xlsx or .csv first`,
+      )
+    }
+    if (!DATASET_EXTENSIONS.has(extension)) {
+      throw new HttpError(415, 'unsupported-file', `unsupported dataset type: .${extension || '(none)'}`)
+    }
+    const sheet = typeof request.sheet === 'string' && request.sheet !== '' ? request.sheet : null
+    let delimiter = typeof request.delimiter === 'string' ? request.delimiter : null
+    if (delimiter !== null && !DATASET_DELIMITERS.has(delimiter)) {
+      throw new HttpError(400, 'bad-request', 'delimiter must be one of , ; | tab')
+    }
+    const header = typeof request.header === 'boolean' ? request.header : undefined
+    const maxRows = Number.isInteger(request.maxRows)
+      ? Math.max(1, Math.min(100, request.maxRows))
+      : LIMITS.datasetPreviewRows
+    const wantedLanguage = typeof request.language === 'string' ? findLanguagePack(request.language) : null
+    const buffer = await fsp.readFile(filePath)
+    let table
+    let sheets = []
+    let activeSheet = null
+    let encoding = null
+    let kind = extension
+    try {
+      if (extension === 'xlsx') {
+        const parsed = await readXlsxTable(buffer, { sheet, header, maxRows })
+        table = buildDatasetTable(parsed.rawRows, {
+          header,
+          maxRows,
+          defaultColumnName: (index) => {
+            let name = ''
+            let value = index + 1
+            while (value > 0) {
+              const remainder = (value - 1) % 26
+              name = String.fromCharCode(65 + remainder) + name
+              value = Math.floor((value - 1) / 26)
+            }
+            return name
+          },
+        })
+        sheets = parsed.sheets
+        activeSheet = parsed.sheet
+        table.totalRows = parsed.totalRows > 0 ? parsed.totalRows - (table.header ? 1 : 0) : table.totalRows
+      } else {
+        const decoded = decodeDatasetText(buffer)
+        encoding = decoded.encoding
+        if (delimiter === null) delimiter = detectDatasetDelimiter(decoded.text, extension)
+        if (delimiter === '\t') kind = 'tsv'
+        const parsed = parseDelimitedRows(decoded.text, delimiter, maxRows)
+        table = buildDatasetTable(parsed.rows, {
+          header,
+          maxRows,
+          defaultColumnName: (index) => `V${index + 1}`,
+        })
+        if (table.header) table.totalRows = Math.max(0, parsed.totalRows - 1)
+        else table.totalRows = parsed.totalRows
+      }
+    } catch (error) {
+      throw new HttpError(400, 'bad-request', `could not read the dataset: ${error?.message ?? error}`)
+    }
+    const generated = buildDatasetSnippets({
+      path: filePath,
+      kind,
+      sheet: activeSheet,
+      delimiter: extension === 'xlsx' ? null : delimiter,
+    })
+    return {
+      ok: true,
+      path: filePath,
+      name: path.basename(filePath),
+      kind,
+      size: fileStat.size,
+      encoding,
+      delimiter: extension === 'xlsx' ? null : delimiter,
+      sheets,
+      sheet: activeSheet,
+      header: table.header,
+      columns: table.columns,
+      rows: table.rows,
+      totalRows: Math.max(0, table.totalRows),
+      previewRows: table.rows.length,
+      truncated: table.truncated,
+      truncatedColumns: table.truncatedColumns,
+      variable: generated.variable,
+      snippets: generated.snippets,
+      import: wantedLanguage ? { language: wantedLanguage.id, code: generated.snippets[wantedLanguage.id] ?? null } : null,
+    }
+  }
 
   async function buildPacksState() {
     const settings = await loadPackSettings()
@@ -3267,6 +3851,7 @@ ${summaryMarkup}
     [API_EXPLAIN, { handlers: { POST: handleExplain } }],
     [API_EXPORT, { handlers: { POST: handleExport } }],
     [API_SAVE_PLOTS, { handlers: { POST: handleSavePlots } }],
+    [API_DATASET, { handlers: { POST: handleDatasetPreview } }],
   ])
 
   async function dispatch(req, res, url) {

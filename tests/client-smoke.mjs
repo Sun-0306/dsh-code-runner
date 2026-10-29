@@ -386,6 +386,8 @@ function createWorld(options) {
     explainRequests: [],
     exportRequests: [],
     savePlotsRequests: [],
+    datasetRequests: [],
+    datasetMode: opts.datasetMode || 'ok',
     pendingRun: null,
     filesCalls: [],
     fileGetCalls: [],
@@ -652,6 +654,63 @@ function createHarness(options) {
         plotFiles: ['plots/plot-001.png'],
         files: ['report.md', 'report.html', 'run.json', 'plots/plot-001.png'],
       }))
+    }
+
+    // /api/dataset/preview — v7 dataset import dialog
+    if (pathname === '/dsh-code-runner/api/dataset/preview') {
+      world.datasetRequests.push(parsedBody)
+      if (world.datasetMode === 'error') {
+        return Promise.resolve(jsonResponse(400, { ok: false, error: { code: 'bad-request', message: 'could not read the dataset' } }))
+      }
+      const body = parsedBody || {}
+      const lowerPath = String(body.path || '').toLowerCase()
+      const language = body.language || 'python'
+      const pythonSnippet = lowerPath.endsWith('.csv')
+        ? 'import pandas as pd\nsales = pd.read_csv("' + body.path + '")'
+        : 'import pandas as pd\nstudents = pd.read_excel("' + body.path + '", sheet_name="' + (body.sheet || '成绩') + '")'
+      const snippetFor = function snippet(languageId) {
+        if (languageId === 'python') return pythonSnippet
+        if (languageId === 'r') return lowerPath.endsWith('.csv')
+          ? 'sales <- read.table("' + body.path + '", header = TRUE, sep = ",")'
+          : 'library(readxl)\nstudents <- read_excel("' + body.path + '")'
+        if (languageId === 'matlab') return 'students = readtable("' + body.path + '");'
+        return null
+      }
+      const csv = lowerPath.endsWith('.csv')
+      const payload = {
+        ok: true,
+        path: body.path,
+        name: csv ? 'sales.csv' : 'students.xlsx',
+        kind: csv ? 'csv' : 'xlsx',
+        size: 4096,
+        encoding: csv ? 'utf-8' : null,
+        delimiter: csv ? (body.delimiter || ',') : null,
+        sheets: csv ? [] : ['成绩', '教师'],
+        sheet: csv ? null : (body.sheet || '成绩'),
+        header: body.header === undefined ? true : body.header,
+        columns: csv
+          ? [
+              { index: 0, name: '姓名', type: 'string' },
+              { index: 1, name: '分数', type: 'number' },
+              { index: 2, name: '备注', type: 'string' },
+            ]
+          : [
+              { index: 0, name: '姓名', type: 'string' },
+              { index: 1, name: '班级', type: 'string' },
+              { index: 2, name: '数学', type: 'number' },
+            ],
+        rows: csv
+          ? [['张三', '92', 'a "quote", ok'], ['李四', '88', '']]
+          : [['张三', 'A班', '92'], ['李四', 'B班', '78.5']],
+        totalRows: 2,
+        previewRows: 2,
+        truncated: false,
+        truncatedColumns: false,
+        variable: csv ? 'sales' : 'students',
+        snippets: { python: pythonSnippet, r: snippetFor('r'), matlab: snippetFor('matlab') },
+        import: snippetFor(language) === null ? null : { language: language, code: snippetFor(language) },
+      }
+      return Promise.resolve(jsonResponse(200, payload))
     }
 
     // /api/save-plots — copy plots next to the code (v3 §1.4)
@@ -1220,6 +1279,12 @@ async function scenarioRegistrations() {
       'explain.retry', 'explain.llmUnavailable', 'explain.failed', 'explain.truncated',
       'export.button', 'export.running', 'export.done', 'export.folder', 'export.copyPath',
       'export.copied', 'export.failed', 'export.empty',
+      'export.plotPlacement', 'export.plotPlacementSection', 'export.plotPlacementUnderCode',
+      'export.plotPlacementSectionHint', 'export.plotPlacementUnderCodeHint',
+      'dataset.open', 'dataset.dialogTitle', 'dataset.path', 'dataset.loading', 'dataset.failed',
+      'dataset.sheet', 'dataset.header', 'dataset.delimiter', 'dataset.summary', 'dataset.import',
+      'dataset.insert', 'dataset.inserted', 'dataset.copy', 'dataset.unsupported', 'dataset.empty',
+      'dataset.close',
       'plots.save', 'plots.saveAll', 'plots.saved', 'plots.saveFailed', 'plots.target', 'plots.size',
       'language.python', 'language.r', 'language.matlab', 'language.node', 'language.bash',
       'language.zsh', 'language.ruby', 'language.perl', 'language.julia', 'language.deno',
@@ -1292,7 +1357,7 @@ async function scenarioRegistrations() {
     assert.ok(names.indexOf('right-tab') !== -1, 'right-tab event missing')
     assert.ok(names.indexOf('header-toggle') !== -1, 'header-toggle event missing')
     const applyEvent = events.find(function isApply(event) { return event && event.name === 'apply' })
-    assert.equal(applyEvent.detail.version, '0.5.0')
+    assert.equal(applyEvent.detail.version, '0.7.0')
     assert.equal(typeof applyEvent.detail.hasSidebarRight, 'boolean')
     const rightTab = events.find(function isRightTabEvent(event) { return event && event.name === 'right-tab' })
     assert.equal(typeof rightTab.detail.tabType, 'boolean')
@@ -2131,6 +2196,25 @@ async function scenarioExport() {
     assert.ok(harness.hasText('源代码') && harness.hasText('输出结果') && harness.hasText('统计图'), 'include options missing')
     assert.ok(harness.hasText('未命名实验报告.docx'), 'file-name preview missing')
   })
+  const placementSelect = function findPlacementSelect(root) {
+    return find(root || harness.mini.tree, function matchPlacement(node) {
+      return node && node.props && node.props.id === 'dcr-export-placement'
+    })
+  }
+  check('export dialog offers the chart-placement choice (v6 §1.3)', () => {
+    assert.ok(harness.hasText('图表位置'), 'placement label missing')
+    assert.ok(harness.hasText('独立章节') && harness.hasText('跟随源代码'), 'placement options missing')
+    const select = placementSelect()
+    assert.ok(select, 'placement select missing')
+    assert.equal(select.props.value, 'section')
+    assert.equal(select.props.disabled, false)
+    assert.ok(harness.hasText('顺序：源代码 → 输出结果 → 统计图'), 'section hint missing')
+  })
+  placementSelect().props.onChange({ target: { value: 'under-code' } })
+  harness.flush()
+  check('choosing 跟随源代码 updates the layout hint', () => {
+    assert.ok(harness.hasText('顺序：源代码 → 统计图 → 输出结果'), 'under-code hint missing')
+  })
   harness.clickText('开始导出')
   await harness.settle(function exportSent() { return harness.world.exportRequests.length >= 1 })
   await harness.settle(function exportDone() { return harness.hasText('报告已生成') })
@@ -2151,6 +2235,7 @@ async function scenarioExport() {
     assert.equal(body.plots[0].name, 'plot-001.png')
     assert.equal(body.plots[0].source, 'run')
     assert.equal(body.format, 'docx')
+    assert.equal(body.plotPlacement, 'under-code')
     assert.deepEqual(body.include, { code: true, output: true, plots: true, summary: true })
     assert.equal(body.name, '未命名')
   })
@@ -2165,6 +2250,15 @@ async function scenarioExport() {
     assert.ok(copied.indexOf('dsh-code-runner-reports') !== -1, 'copied: ' + copied)
   })
   harness.clickAria('关闭')
+  harness.flush()
+  harness.clickText('导出报告')
+  harness.flush()
+  check('reopening the export dialog keeps 跟随源代码 selected', () => {
+    const select = placementSelect()
+    assert.ok(select, 'placement select missing after reopening')
+    assert.equal(select.props.value, 'under-code')
+  })
+  harness.clickText('取消')
   harness.flush()
   check('the export stays reachable from the status bar', () => {
     assert.equal(harness.hasText('报告已生成'), false)
@@ -2182,6 +2276,11 @@ async function scenarioExport() {
   failing.typeCode('print(1)\n')
   failing.clickText('导出报告')
   failing.flush()
+  check('the chart-placement choice is disabled when the run has no charts', () => {
+    const select = placementSelect(failing.mini.tree)
+    assert.ok(select, 'placement select missing')
+    assert.equal(select.props.disabled, true)
+  })
   failing.clickText('开始导出')
   await failing.settle(function mapped() { return failing.hasText('工作目录无效') })
   check('export failure maps bad-cwd to the localized path error', () => {
@@ -2365,6 +2464,80 @@ async function scenarioLanguagePacks() {
   harness.unmount()
 }
 
+// ── Scenario: dataset import (CONTRACT-V7 §2) ─────────────────────────────
+async function scenarioDatasetImport() {
+  scenario('dataset import (v7)')
+  const harness = createHarness({ globalToken: 'global-token' })
+  const studentsPath = harness.world.cwd + '/students.xlsx'
+  const salesPath = harness.world.cwd + '/sales.csv'
+  harness.world.dirs.get(harness.world.cwd).push(entryFor(studentsPath), entryFor(salesPath))
+  harness.mountPage()
+  await harness.settle(function ready() { return harness.hasText('宿主已就绪') })
+  harness.typeCode('print("data")\n')
+  harness.clickText('数据集')
+  await harness.settle(function opened() {
+    return harness.hasText('导入数据集') && harness.hasText('📄 students.xlsx')
+  })
+  check('dataset dialog opens with the current directory data files', () => {
+    assert.ok(harness.hasText('students.xlsx'), 'xlsx file entry missing')
+    assert.ok(harness.hasText('sales.csv'), 'csv file entry missing')
+    assert.ok(harness.hasText('选择下方数据文件或输入路径以查看预览'), 'empty preview hint missing')
+  })
+
+  harness.clickText('📄 students.xlsx')
+  await harness.settle(function previewed() {
+    return harness.world.datasetRequests.length >= 1 && harness.hasText('张三')
+  })
+  check('picking an xlsx renders the preview table + import code', () => {
+    const body = harness.world.datasetRequests[0]
+    assert.equal(body.path, studentsPath)
+    assert.equal(body.language, 'python')
+    assert.ok(harness.hasText('共 2 行 × 3 列'), 'summary line missing')
+    assert.ok(harness.hasText('数学'), 'preview table headers missing')
+    assert.ok(harness.hasText('pd.read_excel'), 'import code missing')
+  })
+
+  const sheetSelect = find(harness.mini.tree, function byId(node) {
+    return node && node.props && node.props.id === 'dcr-dataset-sheet'
+  })
+  sheetSelect.props.onChange({ target: { value: '教师' } })
+  await harness.settle(function sheetLoaded() { return harness.world.datasetRequests.length >= 2 })
+  check('the sheet selector re-requests the preview for that sheet', () => {
+    assert.equal(harness.world.datasetRequests[1].sheet, '教师')
+  })
+
+  harness.clickText('插入到编辑器')
+  await harness.settle(function inserted() { return harness.hasText('导入代码已插入编辑器') })
+  check('insert appends the snippet to the editor and closes the dialog', () => {
+    const code = harness.editorValue()
+    assert.ok(code.indexOf('print("data")') === 0, 'existing editor code was replaced')
+    assert.ok(code.indexOf('pd.read_excel') !== -1, 'import snippet missing from the editor')
+    assert.equal(harness.hasText('导入数据集'), false, 'dialog stayed open after insert')
+  })
+
+  harness.clickText('数据集')
+  await harness.settle(function reopened() { return harness.hasText('导入数据集') })
+  harness.clickText('📄 sales.csv')
+  await harness.settle(function csvPreviewed() {
+    return harness.world.datasetRequests.length >= 3 && harness.hasText('备注')
+  })
+  const delimiterSelect = find(harness.mini.tree, function byId(node) {
+    return node && node.props && node.props.id === 'dcr-dataset-delimiter'
+  })
+  delimiterSelect.props.onChange({ target: { value: ';' } })
+  await harness.settle(function delimiterLoaded() { return harness.world.datasetRequests.length >= 4 })
+  const headerToggle = find(harness.mini.tree, function byId(node) {
+    return node && node.props && node.props.id === 'dcr-dataset-header'
+  })
+  headerToggle.props.onChange({ target: { checked: false } })
+  await harness.settle(function headerLoaded() { return harness.world.datasetRequests.length >= 5 })
+  check('csv options (delimiter + first-row-as-names) are sent to the Host', () => {
+    assert.equal(harness.world.datasetRequests[3].delimiter, ';')
+    assert.equal(harness.world.datasetRequests[4].header, false)
+  })
+  harness.unmount()
+}
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 const SCENARIOS = [
   ['language packs dialog', scenarioLanguagePacks],
@@ -2380,6 +2553,7 @@ const SCENARIOS = [
   ['selection runs', scenarioSelectionRuns],
   ['AI explain dialog', scenarioExplain],
   ['export report', scenarioExport],
+  ['dataset import', scenarioDatasetImport],
   ['plot saving', scenarioPlotSaving],
   ['language profiles + MATLAB', scenarioLanguageProfiles],
 ]

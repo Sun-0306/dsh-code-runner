@@ -981,6 +981,16 @@ const contractLocaleKeys = [
   'explain.retry', 'explain.llmUnavailable', 'explain.failed', 'explain.truncated',
   'export.button', 'export.running', 'export.done', 'export.folder', 'export.copyPath',
   'export.copied', 'export.failed', 'export.empty',
+  // CONTRACT-V6 §1.3 additions (identical key sets in zh + en)
+  'export.plotPlacement', 'export.plotPlacementSection', 'export.plotPlacementUnderCode',
+  'export.plotPlacementSectionHint', 'export.plotPlacementUnderCodeHint',
+  // CONTRACT-V7 §2.3 additions (identical key sets in zh + en)
+  'dataset.open', 'dataset.dialogTitle', 'dataset.path', 'dataset.pathPlaceholder', 'dataset.read',
+  'dataset.browseDir', 'dataset.up', 'dataset.refresh', 'dataset.noDataFiles', 'dataset.loading',
+  'dataset.failed', 'dataset.sheet', 'dataset.header', 'dataset.delimiter', 'dataset.delimiterAuto',
+  'dataset.delimiterTab', 'dataset.summary', 'dataset.truncated', 'dataset.import', 'dataset.insert',
+  'dataset.inserted', 'dataset.copy', 'dataset.copied', 'dataset.unsupported', 'dataset.empty',
+  'dataset.close', 'dataset.kindXlsx', 'dataset.kindText',
   'plots.save', 'plots.saveAll', 'plots.saved', 'plots.saveFailed', 'plots.target', 'plots.size',
   'language.python', 'language.r', 'language.matlab', 'language.node', 'language.bash',
   'language.zsh', 'language.ruby', 'language.perl', 'language.julia', 'language.deno',
@@ -1608,6 +1618,56 @@ check('S88 client.js reports browser diagnostics fire-and-forget (CONTRACT-V2 §
   const missing = eventNames.filter((name) => !clientRaw.includes(`'${name}'`) && !clientRaw.includes(`"${name}"`))
   assert(missing.length === 0, `missing diag event name(s): ${missing.join(', ')}`)
   return 'reportDiag + api/diag + event names'
+})
+
+check('S89 index.js implements CONTRACT-V6 chart placement (under-code vs section)', () => {
+  assert(indexRaw !== null, 'index.js is missing')
+  const markers = [
+    'PLOT_PLACEMENTS', 'under-code', 'plotPlacement', 'code-with-plots',
+    'codePlotsHeading', 'Heading2', 'reportVersion: 6',
+  ]
+  const missing = markers.filter((markerText) => !indexRaw.includes(markerText))
+  assert(missing.length === 0, `missing v6 marker(s): [${missing.join(', ')}]`)
+  assert(
+    /plotPlacement\s*=\s*[\s\S]{0,200}?under-code/.test(indexRaw),
+    'no effective plotPlacement fallback (under-code needs source code + plots)',
+  )
+  return 'plotPlacement validation + html code-with-plots + docx Heading2 + run.json reportVersion 6'
+})
+
+check('S90 client.js exposes the chart-placement choice and sends plotPlacement (v6 §1.3)', () => {
+  assert(clientRaw !== null, 'client.js is missing')
+  for (const markerText of [
+    'plotPlacement', 'under-code', 'setExportPlotPlacement', 'dcr-export-placement',
+    'export.plotPlacement', 'export.plotPlacementUnderCode',
+  ]) {
+    assert(clientRaw.includes(markerText), `missing v6 client marker: ${markerText}`)
+  }
+  return 'placement select + action + request field'
+})
+
+check('S91 index.js implements the v7 dataset preview (xlsx + csv + import snippets)', () => {
+  assert(indexRaw !== null, 'index.js is missing')
+  const markers = [
+    'api/dataset/preview', 'datasetMaxBytes', 'readZipEntries', 'parseSharedStrings',
+    'sharedStrings', 'cellXfs', 'xlsx', 'read_excel', 'pd.read_excel', 'readtable',
+    'snippets', 'delimiter',
+  ]
+  const missing = markers.filter((markerText) => !indexRaw.includes(markerText))
+  assert(missing.length === 0, `missing v7 marker(s): [${missing.join(', ')}]`)
+  assert(indexRaw.includes('readtable('), 'no MATLAB readtable snippet')
+  return 'dataset preview route + dependency-free ZIP/XLSX reader + CSV parser + 3-language snippets'
+})
+
+check('S92 client.js wires the dataset dialog (browse, preview table, insert code)', () => {
+  assert(clientRaw !== null, 'client.js is missing')
+  for (const markerText of [
+    'datasetPreview', 'datasetDialog', 'openDatasetDialog', 'insertDatasetCode',
+    'dcr-datasetTable', 'dcr-datasetCode', 'isDatasetFileName', 'dataset.import',
+  ]) {
+    assert(clientRaw.includes(markerText), `missing v7 client marker: ${markerText}`)
+  }
+  return 'dataset dialog + file browser + preview table + import-code insert'
 })
 
 /* ─────────────────────────────── summary ─────────────────────────────────── */

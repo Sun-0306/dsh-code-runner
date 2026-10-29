@@ -1,6 +1,6 @@
 {
   "name": "dsh-code-runner",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "Run Python, R, Node.js and other scripts from a DSH sidebar panel, with streaming output. · 在 DSH 侧栏面板里直接运行 Python、R、Node.js 等脚本，并实时查看输出。",

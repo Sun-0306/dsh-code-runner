@@ -1,10 +1,16 @@
-# dsh-code-runner · 代码运行器（v5 · 0.5.0）
+# dsh-code-runner · 代码运行器（v7 · 0.7.0）
 
 DeepSeek Harness (DSH) 插件：在 **对话框右侧** 打开一个 RStudio 风格的代码工作台，直接运行
 Python、R、Node.js 等脚本，**图表自动显示**，并且可以 **打开 / 编辑 / 保存工作目录里的程序文件**。
 不必离开和 DeepSeek 的对话。
 
-- **v5 新增**：语言功能包按需安装 —— 检测到本机有某语言才自动启用并安装其图形捕获程序（没有就不加任何文件）；
+- **v7 新增**：**导入数据集（仿 RStudio）** —— 工具栏「数据集」可直接打开 **Excel .xlsx / CSV / TSV**
+  数据文件，表格预览（工作表切换、列类型、日期识别、首行为列名、分隔符），并一键生成
+  **R / Python / MATLAB 导入代码**插入编辑器（不依赖 Excel/pandas 插件安装，.xlsx 由 Host 纯 Node 解析）。
+- **v6**：导出报告可选**图表位置** —— 图表既可以放在「统计图：」独立章节（默认：
+  源代码 → 输出结果 → 统计图），也可以**跟随源代码**放在对应代码下方（源代码 → 统计图 → 输出结果）；
+  Word / Markdown / HTML 三种格式一致，Word 中从属关系用二级标题表达。
+- **v5**：语言功能包按需安装 —— 检测到本机有某语言才自动启用并安装其图形捕获程序（没有就不加任何文件）；
   语言下拉旁「语言与功能」可一键启用/停用；可选包 **C / C++ / Swift**（检测到工具链后可一键安装，C/C++ 先编译再运行）；
   Python 捕获依赖（matplotlib）自动探测并给出安装提示。
 - **v4**：导出报告可选格式（**Word .docx** / Markdown / HTML / 全部）、文件名自动为
@@ -59,13 +65,29 @@ Python、R、Node.js 等脚本，**图表自动显示**，并且可以 **打开 
 - 工具栏 **导出报告** 打开导出对话框，可选择：
   - **文件格式**：Word（`.docx`，默认）、Markdown（`.md`）、HTML（`.html`，图表内嵌）、全部格式；
   - **插入内容**：源代码 / 输出结果 / 统计图 / AI 解读（逐项勾选，不需要的不会写进文档）；
-  - **文件名**：自动为「程序文件名 + 实验报告」，例如 `chart.R` → `chart实验报告.docx`。
+  - **文件名**：自动为「程序文件名 + 实验报告」，例如 `chart.R` → `chart实验报告.docx`；
+  - **图表位置（v6）**：独立章节（默认）/ 跟随源代码（图表放在对应代码下方）；未勾选统计图或本次
+    没有图表时该选项置灰。Word 跟随源代码时「统计图：」用二级标题（Heading2）表达从属关系。
 - 报告写入 **代码文件所在目录**（草稿则在当前工作目录）下的新文件夹：
   `dsh-code-runner-reports/<时间戳>-<语言>/`，其中文档结构固定为 **源代码：/ 输出结果：/ 统计图：**
   （勾选了 AI 解读时追加「AI 解读：」）；Word 中代码/输出用等宽字体、统计图内嵌为图片并带图注。
   另含 `run.json` 元数据与 `plots/` 图片副本；同一秒重名文件夹自动 `-2`，绝不覆盖旧报告。
 - 每次导出都新建文件夹（同一秒重名自动 `-2`），不会覆盖旧报告；这些文件夹是用户文档，插件不会删除。
   成功后会显示路径并提供「复制路径」，状态栏也保留可点击的报告目录入口。
+
+### 导入数据集（v7，仿 RStudio）
+
+- 工具栏 **数据集** → 「导入数据集（仿 RStudio）」对话框：
+  - **数据文件**：输入/粘贴绝对路径回车读取，或从下方目录浏览（文件夹、`.xlsx/.csv/.tsv/.txt`
+    数据文件；支持上级与刷新）。
+  - **预览（RStudio 风格）**：Excel 多工作表下拉、首行为列名开关、CSV 分隔符（自动/,/;/Tab/|）、
+    行×列摘要与前 20 行表格；列类型自动识别（文本 / 数字 / 布尔 / 日期，Excel 日期按样式还原）。
+  - **导入代码**：按当前语言生成，**插入到编辑器**（追加到现有代码末尾，可撤销）或复制：
+    - R：`library(readxl)` + `read_excel("…", sheet = "…")`（csv 为 `read.table`/`read.delim`）
+    - Python：`import pandas as pd` + `pd.read_excel(..., sheet_name=…)` / `pd.read_csv(...)`
+    - MATLAB：`readtable("…", 'Sheet', "…")`
+- 读取完全只读，不修改/复制数据文件；旧版 `.xls` 会提示先另存为 `.xlsx`/`.csv`（无外部依赖，
+  `.xlsx` 由 Host 用 zlib 解析 OOXML）；大文件预览上限 64 MiB、20 行预览。
 
 ### MATLAB 支持（v3）
 - 自动发现 `matlab`（含 `/Applications/MATLAB_R*.app/bin/matlab`、`/usr/local/MATLAB/*/bin/matlab`）；
@@ -142,14 +164,14 @@ plugin_manager action=install_bundle target=<绝对路径>/dsh-code-runner
 
 | 套件 | 内容 | 当前 |
 |---|---|---|
-| `node tests/host-smoke.mjs` | Host 路由契约 + 真实 python/R/绘图 + 文件/诊断/语言包接口（stub ctx） | 44/44 |
-| `node tests/verify-host.mjs` | 独立实现的 stub Host 契约套件（含 explain/export/save-plots/MATLAB 规格、90s 超时） | 96/96 |
-| `node tests/verify-static.mjs` | manifest/locale/图标/两半静态契约（含 v3 标记与 locale 键） | 88/88 |
-| `node tests/verify-live.mjs` | 对运行中的 DSH 做端到端（真实 LLM explain、**Word/MD/HTML 报告导出**、图表保存、**真实 MATLAB 运行+出图**、选中运行语义） | 41/41 |
+| `node tests/host-smoke.mjs` | Host 路由契约 + 真实 python/R/绘图 + 文件/诊断/语言包/报告图表位置/数据集预览接口（stub ctx） | 51/51 |
+| `node tests/verify-host.mjs` | 独立实现的 stub Host 契约套件（含 explain/export/save-plots/MATLAB 规格、报告图表位置三格式顺序、数据集 xlsx/csv 解析、90s 超时） | 102/102 |
+| `node tests/verify-static.mjs` | manifest/locale/图标/两半静态契约（含 v3/v6/v7 标记与 locale 键） | 92/92 |
+| `node tests/verify-live.mjs` | 对运行中的 DSH 做端到端（真实 LLM explain、**Word/MD/HTML 报告导出**、图表保存、**真实 MATLAB 运行+出图**、**报告图表位置**、**数据集预览（xlsx/csv）**、选中运行语义） | 45/45 |
 | `tests/client-real-react.mjs`（可选，需 react/react-dom/jsdom） | 真实 React 18 + jsdom 渲染两种布局 + StrictMode + 主流程点击；捕获 VM 测不出的 React #130 | 17/17 |
-| `node tests/client-smoke.mjs` | VM 内渲染真实 client 模块（注册、两种布局、文件/图表/灯箱、选中运行、AI 对话框、导出格式、**语言与功能对话框**、图表保存、语言自适应、元素类型守卫、诊断） | 98/98 |
+| `node tests/client-smoke.mjs` | VM 内渲染真实 client 模块（注册、两种布局、文件/图表/灯箱、选中运行、AI 对话框、导出格式、**语言与功能对话框**、**图表位置选择**、**数据集导入对话框**、图表保存、语言自适应、元素类型守卫、诊断） | 107/107 |
 
-契约：`CONTRACT.md`（v1）+ `CONTRACT-V2.md`（文件/绘图）+ `CONTRACT-V3.md`（AI/导出/图表/MATLAB/选中）+ `CONTRACT-V5.md`（语言功能包按需安装）。
+契约：`CONTRACT.md`（v1）+ `CONTRACT-V2.md`（文件/绘图）+ `CONTRACT-V3.md`（AI/导出/图表/MATLAB/选中）+ `CONTRACT-V5.md`（语言功能包按需安装）+ `CONTRACT-V6.md`（报告图表位置）+ `CONTRACT-V7.md`（数据集导入）。
 
 > 回归守卫：`client-smoke` 的迷你 React 会像真实 React 一样拒绝非法元素类型（React #130），
 > 例如把 `h(组件)` 误写成 `h(组件())`；v2 首次上线时正是这类写法导致右侧面板报「面板出错了」，

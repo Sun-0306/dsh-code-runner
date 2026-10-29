@@ -22,6 +22,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { buildXlsx, DEFAULT_SHEETS } from './dataset-fixtures.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PLUGIN_DIR = path.resolve(HERE, '..')
@@ -41,6 +42,11 @@ process.env.MPLCONFIGDIR = path.join(SMOKE_ROOT, 'mpl-cache')
 await fsp.mkdir(process.env.MPLCONFIGDIR, { recursive: true })
 
 const ORIGIN = 'http://127.0.0.1:57598'
+// 1×1 PNG used by the v6 export-placement cases.
+const PNG_1PX = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
 const DEFAULT_HOST = '127.0.0.1:57598'
 
 const plugin = await import(pathToFileURL(path.join(PLUGIN_DIR, 'index.js')).href)
@@ -1829,6 +1835,167 @@ await runCase('v5 packs: endpoint is token-gated and validates ids', async () =>
   assertErrorEnvelope(unknown, 400, 'unsupported-language')
   const badBody = await call({ method: 'POST', path: '/dsh-code-runner/api/packs', token, body: { id: 'c' } })
   assertErrorEnvelope(badBody, 400, 'bad-request')
+})
+
+/* ── 9h. v6 report chart placement (CONTRACT-V6 §1.2) ──────────────────────── */
+
+const reportBase = path.join(SMOKE_ROOT, 'report-base')
+const reportPlotSrc = path.join(SMOKE_ROOT, 'report-plots')
+await fsp.mkdir(reportBase, { recursive: true })
+await fsp.mkdir(reportPlotSrc, { recursive: true })
+const reportPng = path.join(reportPlotSrc, 'plot-001.png')
+await fsp.writeFile(reportPng, PNG_1PX)
+const reportBody = {
+  language: 'bash',
+  mode: 'buffer',
+  file: null,
+  cwd: reportBase,
+  command: 'bash /tmp/run.sh',
+  code: 'echo chart\n',
+  stdout: 'out\n',
+  stderr: '',
+  exitCode: 0,
+  durationMs: 10,
+  startedAt: Date.now(),
+  summary: null,
+  plots: [{ path: reportPng, name: 'plot-001.png', source: 'run' }],
+  format: 'md',
+  include: { code: true, output: true, plots: true, summary: false },
+  name: 'smoke-chart',
+}
+const postReport = (body) =>
+  call({ method: 'POST', path: '/dsh-code-runner/api/export', token, body })
+
+await runCase('v6 export: under-code nests 统计图 between the code and the output', async () => {
+  const response = await postReport({ ...reportBody, plotPlacement: 'under-code' })
+  assert.equal(response.status, 200, `export HTTP ${response.status}: ${response.text}`)
+  assert.equal(response.json.plotPlacement, 'under-code', 'plotPlacement was not honoured')
+  const md = fs.readFileSync(response.json.reportPath, 'utf8')
+  const code = md.indexOf('## 源代码：')
+  const plots = md.indexOf('## 统计图：')
+  const output = md.indexOf('## 输出结果：')
+  assert.ok(code >= 0 && plots >= 0 && output >= 0, 'report.md lacks a section')
+  assert.ok(code < plots && plots < output, `report.md order is code=${code} plots=${plots} output=${output}`)
+  assert.ok(md.indexOf('](plots/plot-001.png)') > plots, 'report.md lacks the plot link')
+})
+
+await runCase('v6 export: omitted plotPlacement keeps the standalone 统计图 section', async () => {
+  const response = await postReport(reportBody)
+  assert.equal(response.status, 200, `export HTTP ${response.status}: ${response.text}`)
+  assert.equal(response.json.plotPlacement, 'section', 'default plotPlacement is not section')
+  const md = fs.readFileSync(response.json.reportPath, 'utf8')
+  const code = md.indexOf('## 源代码：')
+  const output = md.indexOf('## 输出结果：')
+  const plots = md.indexOf('## 统计图：')
+  assert.ok(code >= 0 && output >= 0 && plots >= 0, 'report.md lacks a section')
+  assert.ok(code < output && output < plots, `default report.md order is code=${code} output=${output} plots=${plots}`)
+})
+
+await runCase('v6 export: unknown placement → 400 and under-code falls back without a code section', async () => {
+  const invalid = await postReport({ ...reportBody, plotPlacement: 'inline' })
+  assertErrorEnvelope(invalid, 400, 'bad-request')
+  const noCode = await postReport({
+    ...reportBody,
+    include: { code: false, output: true, plots: true, summary: false },
+    plotPlacement: 'under-code',
+  })
+  assert.equal(noCode.status, 200, `no-code export HTTP ${noCode.status}: ${noCode.text}`)
+  assert.equal(noCode.json.plotPlacement, 'section', 'charts stayed nested without a source section')
+  const md = fs.readFileSync(noCode.json.reportPath, 'utf8')
+  assert.ok(md.indexOf('## 统计图：') > md.indexOf('## 输出结果：'), 'orphan charts have no standalone section')
+})
+
+/* ── 9i. v7 dataset preview + import code (CONTRACT-V7 §1) ─────────────────── */
+
+const datasetDir = path.join(SMOKE_ROOT, 'datasets')
+await fsp.mkdir(datasetDir, { recursive: true })
+const datasetXlsx = path.join(datasetDir, 'students.xlsx')
+const datasetCsv = path.join(datasetDir, 'scores.csv')
+await fsp.writeFile(datasetXlsx, buildXlsx(DEFAULT_SHEETS))
+await fsp.writeFile(
+  datasetCsv,
+  '姓名,分数,备注\n"张三",92,"a ""quote"", ok"\n李四,88,\n',
+  'utf8',
+)
+const postDataset = (body) =>
+  call({ method: 'POST', path: '/dsh-code-runner/api/dataset/preview', token, body })
+
+await runCase('v7 dataset: xlsx preview exposes sheets, typed columns and import snippets', async () => {
+  const response = await postDataset({ path: datasetXlsx, language: 'r' })
+  assert.equal(response.status, 200, `preview HTTP ${response.status}: ${response.text}`)
+  const payload = response.json
+  assert.equal(payload.ok, true, 'preview ok is not true')
+  assert.deepEqual(payload.sheets, ['成绩', '教师'], `sheets are ${JSON.stringify(payload.sheets)}`)
+  assert.equal(payload.sheet, '成绩', 'first sheet was not selected')
+  assert.equal(payload.header, true, 'header row was not detected')
+  assert.deepEqual(
+    payload.columns.map((column) => column.name),
+    ['姓名', '班级', '数学', '英语', '入学日期'],
+  )
+  assert.deepEqual(
+    payload.columns.map((column) => column.type),
+    ['string', 'string', 'number', 'number', 'date'],
+  )
+  assert.deepEqual(payload.rows[0], ['张三', 'A班', '92', '88', '2026-09-01'])
+  assert.equal(payload.totalRows, 3, `totalRows is ${payload.totalRows}`)
+  assert.equal(payload.variable, 'students', `variable is ${payload.variable}`)
+  assert.ok(payload.snippets.r.includes('read_excel'), 'R snippet lacks read_excel')
+  assert.ok(payload.snippets.python.includes('pd.read_excel'), 'python snippet lacks pd.read_excel')
+  assert.ok(payload.snippets.matlab.includes('readtable'), 'matlab snippet lacks readtable')
+  assert.equal(payload.import.language, 'r', 'import language is not r')
+  assert.ok(payload.import.code.includes('library(readxl)'), 'R import code lacks library(readxl)')
+  const second = await postDataset({ path: datasetXlsx, sheet: '教师', language: 'matlab' })
+  assert.equal(second.status, 200, `sheet preview HTTP ${second.status}: ${second.text}`)
+  assert.equal(second.json.sheet, '教师', 'requested sheet was not selected')
+  assert.equal(second.json.rows[0][0], 'Wang', `sheet row is ${JSON.stringify(second.json.rows[0])}`)
+  assert.ok(second.json.import.code.includes("'Sheet'"), 'matlab import code lacks the Sheet argument')
+})
+
+await runCase('v7 dataset: csv preview handles quotes, UTF-8 and the header toggle', async () => {
+  const response = await postDataset({ path: datasetCsv, language: 'python' })
+  assert.equal(response.status, 200, `csv preview HTTP ${response.status}: ${response.text}`)
+  const payload = response.json
+  assert.equal(payload.kind, 'csv', `kind is ${payload.kind}`)
+  assert.equal(payload.delimiter, ',', 'comma delimiter was not detected')
+  assert.equal(payload.encoding, 'utf-8', `encoding is ${payload.encoding}`)
+  assert.equal(payload.header, true, 'csv header row was not detected')
+  assert.deepEqual(payload.rows[0], ['张三', '92', 'a "quote", ok'])
+  assert.equal(payload.totalRows, 2, `csv totalRows is ${payload.totalRows}`)
+  assert.ok(payload.import.code.includes('pd.read_csv'), 'python import code lacks pd.read_csv')
+  const noHeader = await postDataset({ path: datasetCsv, header: false })
+  assert.equal(noHeader.status, 200, `header:false preview HTTP ${noHeader.status}`)
+  assert.equal(noHeader.json.header, false, 'header:false was ignored')
+  assert.deepEqual(
+    noHeader.json.columns.map((column) => column.name),
+    ['V1', 'V2', 'V3'],
+  )
+  assert.equal(noHeader.json.totalRows, 3, 'header:false totalRows should include the title row')
+})
+
+await runCase('v7 dataset: preview validation rejects bad paths, types and delimiters', async () => {
+  const relative = await postDataset({ path: 'students.xlsx' })
+  assertErrorEnvelope(relative, 400, 'bad-path')
+  const missing = await postDataset({ path: path.join(datasetDir, 'missing.xlsx') })
+  assertErrorEnvelope(missing, 404, 'not-found')
+  const workbook = path.join(datasetDir, 'notes.docx')
+  await fsp.writeFile(workbook, 'not a dataset')
+  const unsupported = await postDataset({ path: workbook })
+  assertErrorEnvelope(unsupported, 415, 'unsupported-file')
+  const legacy = path.join(datasetDir, 'legacy.xls')
+  await fsp.writeFile(legacy, 'old binary')
+  const legacyResponse = await postDataset({ path: legacy })
+  assertErrorEnvelope(legacyResponse, 415, 'unsupported-file')
+  const badDelimiter = await postDataset({ path: datasetCsv, delimiter: '::' })
+  assertErrorEnvelope(badDelimiter, 400, 'bad-request')
+})
+
+await runCase('v7 dataset: endpoint is token-gated', async () => {
+  const anonymous = await call({
+    method: 'POST',
+    path: '/dsh-code-runner/api/dataset/preview',
+    body: { path: datasetXlsx },
+  })
+  assertErrorEnvelope(anonymous, 401, 'unauthorized')
 })
 
 /* ── 10. Retention: at most 25 runs (§1.7) ─────────────────────────────────── */

@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, truncate as truncateFile, utimes, writeFile } from 'node:fs/promises'
 import { request as httpRequest } from 'node:http'
 import os from 'node:os'
+import { buildXlsx, DEFAULT_SHEETS } from './dataset-fixtures.mjs'
 import path from 'node:path'
 
 const BASE = (process.env.DSH_WEB_URL || 'http://127.0.0.1:57598').replace(/\/+$/, '')
@@ -333,6 +334,10 @@ async function main() {
       'L38 POST /api/explain returns a real LLM summary',
       'L39 POST /api/export writes report.md/html/run.json + plots into a new folder',
       'L40 export never reuses a folder (same-second collision gets -2)',
+      'L44 export plotPlacement:"under-code" nests the charts under the source code',
+      'L45 plot placement defaults to the standalone 统计图 section and rejects unknown values',
+      'L46 dataset preview reads a real .xlsx (sheets/typed columns/rows/snippets)',
+      'L47 dataset preview reads CSV + rejects invalid/legacy inputs',
       'L41 POST /api/save-plots copies + dedupes into a temp target',
       'L42 MATLAB detected + real matlab run with figure capture',
       'L43 selection-run semantics = R buffer run of a partial script',
@@ -1132,6 +1137,97 @@ async function main() {
     pass('L40 export never reuses a folder (same-second collision gets -2)', `${path.basename(reportFolder)} / ${path.basename(secondFolder)}`)
   } catch (error) {
     fail('L40 export never reuses a folder (same-second collision gets -2)', error.message)
+  }
+
+  try {
+    assert(exportBody && rRunPlot, 'no export evidence for the under-code placement case')
+    const underCode = await apiFetch('/export', {
+      method: 'POST',
+      body: { ...exportBody, format: 'all', plotPlacement: 'under-code' },
+    })
+    assert(underCode.status === 200, `under-code export HTTP ${underCode.status}`, truncate(underCode.text))
+    const json = underCode.json
+    assert(json.plotPlacement === 'under-code', `plotPlacement is ${JSON.stringify(json.plotPlacement)}`)
+    const reportMd = await readFile(json.reportPath, 'utf8')
+    const mdCode = reportMd.indexOf('## 源代码：')
+    const mdPlots = reportMd.indexOf('## 统计图：')
+    const mdOutput = reportMd.indexOf('## 输出结果：')
+    assert(mdCode >= 0 && mdPlots >= 0 && mdOutput >= 0, 'report.md lacks a required section')
+    assert(mdCode < mdPlots && mdPlots < mdOutput, `report.md order is code=${mdCode} plots=${mdPlots} output=${mdOutput}`)
+    const html = await readFile(json.htmlPath, 'utf8')
+    assert(html.includes('class="code-with-plots"'), 'report.html does not group the charts under the code')
+    const runJson = JSON.parse(await readFile(path.join(json.folder, 'run.json'), 'utf8'))
+    assert(runJson.plotPlacement === 'under-code', 'run.json does not record plotPlacement')
+    pass(
+      'L44 export plotPlacement:"under-code" nests the charts under the source code',
+      `${path.basename(json.folder)}: code→charts→output in md + html`,
+    )
+  } catch (error) {
+    fail('L44 export plotPlacement:"under-code" nests the charts under the source code', error.message)
+  }
+
+  try {
+    assert(exportBody, 'no export body for the default-placement case')
+    const defaultExport = await apiFetch('/export', { method: 'POST', body: { ...exportBody, format: 'md' } })
+    assert(defaultExport.status === 200, `default export HTTP ${defaultExport.status}`, truncate(defaultExport.text))
+    assert(defaultExport.json.plotPlacement === 'section', 'omitted plotPlacement is not section')
+    const md = await readFile(defaultExport.json.reportPath, 'utf8')
+    const positions = ['## 源代码：', '## 输出结果：', '## 统计图：'].map((label) => md.indexOf(label))
+    assert(positions.every((position) => position >= 0), 'default report.md lacks a section')
+    assert(positions[0] < positions[1] && positions[1] < positions[2], 'default report.md is not in section order')
+    const invalid = await apiFetch('/export', { method: 'POST', body: { ...exportBody, plotPlacement: 'inline' } })
+    assert(invalid.status === 400, `unknown plotPlacement HTTP ${invalid.status}`, truncate(invalid.text))
+    pass('L45 plot placement defaults to the standalone 统计图 section and rejects unknown values', 'section order + 400')
+  } catch (error) {
+    fail('L45 plot placement defaults to the standalone 统计图 section and rejects unknown values', error.message)
+  }
+
+  try {
+    const datasetPath = path.join(workspace, 'students.xlsx')
+    await writeFile(datasetPath, buildXlsx(DEFAULT_SHEETS))
+    const preview = await apiFetch('/dataset/preview', {
+      method: 'POST',
+      body: { path: datasetPath, language: 'python' },
+    })
+    assert(preview.status === 200, `dataset preview HTTP ${preview.status}`, truncate(preview.text))
+    const payload = preview.json
+    assert(payload && payload.ok === true, 'dataset preview ok is not true')
+    assert(Array.isArray(payload.sheets) && payload.sheets.length === 2, `sheets are ${JSON.stringify(payload.sheets)}`)
+    assert(payload.sheet === '成绩', `first sheet is ${JSON.stringify(payload.sheet)}`)
+    assert(payload.columns[4].type === 'date', `date column type is ${JSON.stringify(payload.columns[4].type)}`)
+    assert(payload.rows[0][0] === '张三', `first cell is ${JSON.stringify(payload.rows[0][0])}`)
+    assert(payload.totalRows === 3, `totalRows is ${payload.totalRows}`)
+    assert(payload.import && payload.import.code.includes('pd.read_excel'), 'python import snippet missing read_excel')
+    pass(
+      'L46 dataset preview reads a real .xlsx (sheets/typed columns/rows/snippets)',
+      `${payload.sheets.length} sheets, ${payload.columns.length} columns, ${payload.totalRows} rows`,
+    )
+  } catch (error) {
+    fail('L46 dataset preview reads a real .xlsx (sheets/typed columns/rows/snippets)', error.message)
+  }
+
+  try {
+    const csvPath = path.join(workspace, 'scores.csv')
+    await writeFile(csvPath, '姓名,分数\n张三,92\n"李四",88\n', 'utf8')
+    const preview = await apiFetch('/dataset/preview', {
+      method: 'POST',
+      body: { path: csvPath, language: 'r' },
+    })
+    assert(preview.status === 200, `csv preview HTTP ${preview.status}`, truncate(preview.text))
+    const payload = preview.json
+    assert(payload.delimiter === ',', `delimiter is ${JSON.stringify(payload.delimiter)}`)
+    assert(payload.rows[0][0] === '张三', `csv first cell is ${JSON.stringify(payload.rows[0][0])}`)
+    assert(payload.totalRows === 2, `csv totalRows is ${payload.totalRows}`)
+    assert(payload.import && payload.import.code.includes('read.table'), 'R import snippet missing read.table')
+    const relative = await apiFetch('/dataset/preview', { method: 'POST', body: { path: 'scores.csv' } })
+    assert(relative.status === 400, `relative path HTTP ${relative.status}`)
+    const legacyPath = path.join(workspace, 'old.xls')
+    await writeFile(legacyPath, 'old binary')
+    const legacy = await apiFetch('/dataset/preview', { method: 'POST', body: { path: legacyPath } })
+    assert(legacy.status === 415, `legacy .xls HTTP ${legacy.status}`, truncate(legacy.text))
+    pass('L47 dataset preview reads CSV + rejects invalid/legacy inputs', 'csv rows ok, 400 bad-path, 415 legacy .xls')
+  } catch (error) {
+    fail('L47 dataset preview reads CSV + rejects invalid/legacy inputs', error.message)
   }
 
   try {

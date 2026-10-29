@@ -20,7 +20,7 @@ window.__ModuleLoader__.load({
 
     // ── Fixed identifiers (CONTRACT-V2 §0) ─────────────────────────────────
     /** Reported in the diagnostics boot event and the README test table. */
-    const CLIENT_VERSION = '0.5.0'
+    const CLIENT_VERSION = '0.7.0'
     const NS = 'dsh-code-runner'
     const PANEL_ID = 'code-runner'
     const PANEL_ORDER = 30
@@ -59,6 +59,7 @@ window.__ModuleLoader__.load({
       explain: 'dsh-code-runner/api/explain',
       export: 'dsh-code-runner/api/export',
       savePlots: 'dsh-code-runner/api/save-plots',
+      datasetPreview: 'dsh-code-runner/api/dataset/preview',
     }
 
     // ── Browser diagnostics (CONTRACT-V2.md §1.11) ──────────────────────────
@@ -314,6 +315,39 @@ window.__ModuleLoader__.load({
       'export.start': '开始导出',
       'export.cancel': '取消',
       'export.noPlots': '本次运行还没有图表',
+      'export.plotPlacement': '图表位置',
+      'export.plotPlacementSection': '独立章节（统计图：在最后）',
+      'export.plotPlacementUnderCode': '跟随源代码（放在源代码下方）',
+      'export.plotPlacementSectionHint': '顺序：源代码 → 输出结果 → 统计图',
+      'export.plotPlacementUnderCodeHint': '顺序：源代码 → 统计图 → 输出结果',
+      'dataset.open': '数据集',
+      'dataset.dialogTitle': '导入数据集（仿 RStudio）',
+      'dataset.path': '数据文件',
+      'dataset.pathPlaceholder': '输入 .xlsx / .csv 文件绝对路径',
+      'dataset.read': '读取',
+      'dataset.browseDir': '浏览目录',
+      'dataset.up': '上级',
+      'dataset.refresh': '刷新',
+      'dataset.noDataFiles': '当前目录没有数据文件',
+      'dataset.loading': '正在读取数据集…',
+      'dataset.failed': '读取失败：{detail}',
+      'dataset.sheet': '工作表',
+      'dataset.header': '首行为列名',
+      'dataset.delimiter': '分隔符',
+      'dataset.delimiterAuto': '自动',
+      'dataset.delimiterTab': '制表符',
+      'dataset.summary': '共 {rows} 行 × {cols} 列',
+      'dataset.truncated': '仅预览前 {rows} 行',
+      'dataset.import': '导入代码（{language}）',
+      'dataset.insert': '插入到编辑器',
+      'dataset.inserted': '导入代码已插入编辑器',
+      'dataset.copy': '复制代码',
+      'dataset.copied': '代码已复制',
+      'dataset.unsupported': '当前语言暂不支持自动生成导入代码',
+      'dataset.empty': '选择下方数据文件或输入路径以查看预览',
+      'dataset.close': '关闭',
+      'dataset.kindXlsx': 'Excel 工作簿',
+      'dataset.kindText': '文本数据',
       'packs.open': '语言与功能',
       'packs.title': '语言与功能（按需安装）',
       'packs.intro': '检测到本机已安装的语言会自动启用并安装其图形捕获配置；未安装的语言不会加入，也可以按需一键启用或停用。',
@@ -501,6 +535,39 @@ window.__ModuleLoader__.load({
       'export.start': 'Export',
       'export.cancel': 'Cancel',
       'export.noPlots': 'This run has no charts yet',
+      'export.plotPlacement': 'Chart placement',
+      'export.plotPlacementSection': 'Separate section (统计图 at the end)',
+      'export.plotPlacementUnderCode': 'Follow the source code (charts under the code)',
+      'export.plotPlacementSectionHint': 'Order: source → output → charts',
+      'export.plotPlacementUnderCodeHint': 'Order: source → charts → output',
+      'dataset.open': 'Dataset',
+      'dataset.dialogTitle': 'Import dataset (RStudio-style)',
+      'dataset.path': 'Data file',
+      'dataset.pathPlaceholder': 'Absolute path to an .xlsx / .csv file',
+      'dataset.read': 'Read',
+      'dataset.browseDir': 'Browse',
+      'dataset.up': 'Up',
+      'dataset.refresh': 'Refresh',
+      'dataset.noDataFiles': 'No data files in this directory',
+      'dataset.loading': 'Reading the dataset…',
+      'dataset.failed': 'Could not read the dataset: {detail}',
+      'dataset.sheet': 'Sheet',
+      'dataset.header': 'First row as names',
+      'dataset.delimiter': 'Delimiter',
+      'dataset.delimiterAuto': 'Auto',
+      'dataset.delimiterTab': 'Tab',
+      'dataset.summary': '{rows} rows × {cols} columns',
+      'dataset.truncated': 'Previewing the first {rows} rows',
+      'dataset.import': 'Import code ({language})',
+      'dataset.insert': 'Insert into editor',
+      'dataset.inserted': 'Import code inserted into the editor',
+      'dataset.copy': 'Copy code',
+      'dataset.copied': 'Code copied',
+      'dataset.unsupported': 'No import snippet for this language yet',
+      'dataset.empty': 'Pick a data file below or type a path to preview it',
+      'dataset.close': 'Close',
+      'dataset.kindXlsx': 'Excel workbook',
+      'dataset.kindText': 'Text data',
       'packs.open': 'Languages',
       'packs.title': 'Languages & features (on demand)',
       'packs.intro': 'Detected languages are enabled automatically with their plot-capture config installed; missing ones are not added, and you can enable/disable any pack here.',
@@ -731,6 +798,11 @@ window.__ModuleLoader__.load({
       const dot = name.lastIndexOf('.')
       if (dot <= 0 || dot === name.length - 1) return ''
       return name.slice(dot + 1).toLowerCase()
+    }
+
+    function isDatasetFileName(name) {
+      const extension = extensionOf(name)
+      return extension === 'xlsx' || extension === 'csv' || extension === 'tsv' || extension === 'txt'
     }
 
     function languageForExtension(extension, availableIds) {
@@ -1140,7 +1212,21 @@ window.__ModuleLoader__.load({
           lastCodeKey: '',
         },
         exportState: { status: 'idle', folder: '', reportPath: '', htmlPath: '', docxPath: '', error: null, savedAt: 0 },
-        exportDialog: { open: false, format: 'docx', include: { code: true, output: true, plots: true, summary: true } },
+        exportDialog: { open: false, format: 'docx', plotPlacement: 'section', include: { code: true, output: true, plots: true, summary: true } },
+        datasetDialog: {
+          open: false,
+          path: '',
+          browseDir: '',
+          entries: [],
+          entriesStatus: 'idle',
+          entriesError: null,
+          status: 'idle',
+          error: null,
+          preview: null,
+          sheet: null,
+          header: null,
+          delimiter: null,
+        },
         packs: { status: 'idle', items: [], stateDir: '', error: null },
         packsOpen: false,
         plotSave: { status: 'idle', targetDir: '', saved: [], error: null },
@@ -1200,6 +1286,7 @@ window.__ModuleLoader__.load({
             explain: state.explain,
             exportState: state.exportState,
             exportDialog: state.exportDialog,
+            datasetDialog: state.datasetDialog,
             packs: state.packs,
             packsOpen: state.packsOpen,
             plotSave: state.plotSave,
@@ -2275,6 +2362,179 @@ window.__ModuleLoader__.load({
         return copyText(summary, 'explain.copied')
       }
 
+      // ── v7: dataset import (CONTRACT-V7 §2) ─────────────────────────────
+      function datasetDialogPatch(patch) {
+        state.datasetDialog = Object.assign({}, state.datasetDialog, patch)
+        emit()
+      }
+
+      function loadDatasetEntries(dir) {
+        const target = typeof dir === 'string' && dir !== '' ? dir : (state.cwd || '')
+        if (target === '') {
+          datasetDialogPatch({ browseDir: '', entries: [], entriesStatus: 'ready', entriesError: null })
+          return Promise.resolve(null)
+        }
+        datasetDialogPatch({ browseDir: target, entriesStatus: 'loading', entriesError: null })
+        return requestWithToken('GET', API.files + '?dir=' + encodeURIComponent(target)).then(function onDatasetEntries(payload) {
+          if (!state.datasetDialog.open || state.datasetDialog.browseDir !== target) return null
+          state.datasetDialog = Object.assign({}, state.datasetDialog, {
+            entries: payload && Array.isArray(payload.entries) ? payload.entries : [],
+            entriesStatus: 'ready',
+            entriesError: null,
+          })
+          emit()
+          return null
+        }, function onDatasetEntriesFailure(error) {
+          if (isAbortError(error)) return null
+          const normalized = normalizeError(error)
+          if (state.datasetDialog.browseDir !== target) return null
+          state.datasetDialog = Object.assign({}, state.datasetDialog, {
+            entries: [],
+            entriesStatus: 'error',
+            entriesError: normalized,
+          })
+          emit()
+          return null
+        })
+      }
+
+      function openDatasetDialog() {
+        if (!state.datasetDialog.open) {
+          state.datasetDialog = Object.assign({}, state.datasetDialog, { open: true })
+          emit()
+        }
+        const fallbackDir = state.env.data && typeof state.env.data.defaultCwd === 'string' ? state.env.data.defaultCwd : ''
+        loadDatasetEntries(state.datasetDialog.browseDir || state.cwd || fallbackDir)
+      }
+
+      function closeDatasetDialog() {
+        if (!state.datasetDialog.open) return
+        datasetDialogPatch({ open: false })
+      }
+
+      function setDatasetPath(value) {
+        datasetDialogPatch({ path: typeof value === 'string' ? value : '' })
+      }
+
+      function requestDatasetPreview(overrides) {
+        const dialog = state.datasetDialog
+        const options = overrides || {}
+        const filePath = String(typeof options.path === 'string' ? options.path : dialog.path || '').trim()
+        if (filePath === '') return Promise.resolve(null)
+        const sheet = Object.prototype.hasOwnProperty.call(options, 'sheet') ? options.sheet : dialog.sheet
+        const header = Object.prototype.hasOwnProperty.call(options, 'header') ? options.header : dialog.header
+        const delimiter = Object.prototype.hasOwnProperty.call(options, 'delimiter') ? options.delimiter : dialog.delimiter
+        const body = { path: filePath, maxRows: 20 }
+        if (state.languageId !== '') body.language = state.languageId
+        if (typeof sheet === 'string' && sheet !== '') body.sheet = sheet
+        if (header === true || header === false) body.header = header
+        if (typeof delimiter === 'string' && delimiter !== '') body.delimiter = delimiter
+        datasetDialogPatch({
+          path: filePath,
+          status: 'loading',
+          error: null,
+          sheet: typeof sheet === 'string' && sheet !== '' ? sheet : null,
+          header: header === true || header === false ? header : null,
+          delimiter: typeof delimiter === 'string' && delimiter !== '' ? delimiter : null,
+        })
+        return requestWithToken('POST', API.datasetPreview, { body: body }).then(function onDatasetPreview(payload) {
+          if (!state.datasetDialog.open) return null
+          state.datasetDialog = Object.assign({}, state.datasetDialog, {
+            status: 'ready',
+            error: null,
+            preview: payload,
+            sheet: payload && payload.sheet ? payload.sheet : null,
+            path: payload && typeof payload.path === 'string' ? payload.path : state.datasetDialog.path,
+          })
+          emit()
+          return payload
+        }, function onDatasetPreviewFailure(error) {
+          if (isAbortError(error)) return null
+          const normalized = normalizeError(error)
+          state.datasetDialog = Object.assign({}, state.datasetDialog, {
+            status: 'error',
+            error: normalized,
+            preview: null,
+          })
+          emit()
+          return null
+        })
+      }
+
+      function selectDatasetEntry(entry) {
+        if (!entry || typeof entry.path !== 'string' || entry.path === '') return Promise.resolve(null)
+        if (entry.isDir === true) return loadDatasetEntries(entry.path)
+        if (!isDatasetFileName(entry.name)) return Promise.resolve(null)
+        return requestDatasetPreview({ path: entry.path })
+      }
+
+      function datasetUp() {
+        const dir = state.datasetDialog.browseDir || state.cwd || ''
+        if (dir === '') return Promise.resolve(null)
+        return loadDatasetEntries(dirname(dir))
+      }
+
+      function refreshDatasetEntries() {
+        return loadDatasetEntries(state.datasetDialog.browseDir || state.cwd || '')
+      }
+
+      function readDatasetPath() {
+        return requestDatasetPreview({ path: state.datasetDialog.path })
+      }
+
+      function setDatasetSheet(name) {
+        if (typeof name !== 'string' || name === '') return Promise.resolve(null)
+        return requestDatasetPreview({ sheet: name })
+      }
+
+      function setDatasetHeader(value) {
+        return requestDatasetPreview({ header: value === true })
+      }
+
+      function setDatasetDelimiter(value) {
+        return requestDatasetPreview({ delimiter: typeof value === 'string' && value !== '' ? value : null })
+      }
+
+      function datasetImportCode() {
+        const preview = state.datasetDialog.preview
+        if (!preview || !preview.import || typeof preview.import.code !== 'string') return ''
+        return preview.import.code
+      }
+
+      function insertDatasetCode() {
+        const snippet = datasetImportCode()
+        if (snippet === '') {
+          pushNotice('dataset.unsupported', 'warn')
+          emit()
+          return Promise.resolve(false)
+        }
+        const previousCode = state.code
+        let nextCode = previousCode
+        if (nextCode === '') nextCode = snippet + '\n'
+        else if (nextCode.charAt(nextCode.length - 1) === '\n') nextCode = nextCode + snippet + '\n'
+        else nextCode = nextCode + '\n\n' + snippet + '\n'
+        const preview = state.datasetDialog.preview
+        state.code = nextCode
+        if (state.filePath !== null) state.dirty = state.code !== state.savedCode
+        else {
+          state.dirty = false
+          scheduleDraftSave()
+        }
+        resetSelection()
+        state.datasetDialog = Object.assign({}, state.datasetDialog, { open: false })
+        setUi({ notice: { key: 'dataset.inserted', params: null, tone: 'success', retry: false } })
+        emit()
+        reportDiag('dataset-insert', {
+          language: state.languageId,
+          rows: preview && typeof preview.totalRows === 'number' ? preview.totalRows : 0,
+        })
+        return Promise.resolve(true)
+      }
+
+      function copyDatasetCode() {
+        return copyText(datasetImportCode(), 'dataset.copied')
+      }
+
       // ── v3: export report (CONTRACT-V3 §2.3) ────────────────────────────
       function hasExportableContent() {
         return String(state.code).trim() !== '' || state.output.stdout !== '' || state.output.stderr !== ''
@@ -2301,6 +2561,7 @@ window.__ModuleLoader__.load({
         state.exportDialog = {
           open: true,
           format: state.exportDialog.format || 'docx',
+          plotPlacement: state.exportDialog.plotPlacement === 'under-code' ? 'under-code' : 'section',
           include: {
             code: include.code !== false,
             output: include.output !== false,
@@ -2321,6 +2582,12 @@ window.__ModuleLoader__.load({
         const allowed = ['docx', 'md', 'html', 'all']
         if (allowed.indexOf(format) < 0) return
         state.exportDialog = Object.assign({}, state.exportDialog, { format: format })
+        emit()
+      }
+
+      function setExportPlotPlacement(value) {
+        if (value !== 'section' && value !== 'under-code') return
+        state.exportDialog = Object.assign({}, state.exportDialog, { plotPlacement: value })
         emit()
       }
 
@@ -2357,6 +2624,7 @@ window.__ModuleLoader__.load({
             : null,
           plots: exportPlotsPayload(),
           format: state.exportDialog.format || 'docx',
+          plotPlacement: state.exportDialog.plotPlacement === 'under-code' ? 'under-code' : 'section',
           include: state.exportDialog.include,
           name:
             state.filePath !== null
@@ -2943,6 +3211,20 @@ window.__ModuleLoader__.load({
           togglePack: togglePack,
           closeExportDialog: closeExportDialog,
           setExportFormat: setExportFormat,
+          setExportPlotPlacement: setExportPlotPlacement,
+          openDatasetDialog: openDatasetDialog,
+          closeDatasetDialog: closeDatasetDialog,
+          setDatasetPath: setDatasetPath,
+          readDatasetPath: readDatasetPath,
+          selectDatasetEntry: selectDatasetEntry,
+          browseDatasetDir: loadDatasetEntries,
+          datasetUp: datasetUp,
+          refreshDatasetEntries: refreshDatasetEntries,
+          setDatasetSheet: setDatasetSheet,
+          setDatasetHeader: setDatasetHeader,
+          setDatasetDelimiter: setDatasetDelimiter,
+          insertDatasetCode: insertDatasetCode,
+          copyDatasetCode: copyDatasetCode,
           toggleExportInclude: toggleExportInclude,
           showExportNotice: showExportNotice,
           savePlotAt: savePlotAt,
@@ -3161,6 +3443,25 @@ window.__ModuleLoader__.load({
       '.dcr-dialogBody{font-size:11px;line-height:17px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere;white-space:pre-wrap;}',
       '.dcr-dialogRow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;justify-content:flex-end;}',
       '.dcr-dialogRow .dcr-input{flex:1 1 160px;}',
+      '.dcr-datasetDialog{max-height:calc(100vh - 120px);overflow:auto;}',
+      '.dcr-datasetPath{flex:1 1 260px;}',
+      '.dcr-datasetBrowse{display:flex;flex-direction:column;gap:4px;min-width:0;}',
+      '.dcr-datasetBrowseHead{justify-content:flex-start;}',
+      '.dcr-datasetDir{overflow-wrap:anywhere;}',
+      '.dcr-datasetFiles{display:flex;flex-wrap:wrap;gap:4px;max-height:96px;overflow:auto;padding:4px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);}',
+      '.dcr-datasetEntry{box-sizing:border-box;max-width:100%;height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:11px;line-height:22px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dcr-datasetEntry:hover{background:var(--dsw-alias-bg-layer-2);}',
+      '.dcr-datasetEntry[data-active="true"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary);}',
+      '.dcr-datasetPreview{display:flex;flex-direction:column;gap:6px;min-width:0;}',
+      '.dcr-datasetControls{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;}',
+      '.dcr-datasetTableWrap{max-height:220px;overflow:auto;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);}',
+      '.dcr-datasetTable{border-collapse:collapse;width:100%;font-size:11px;line-height:16px;}',
+      '.dcr-datasetTable th,.dcr-datasetTable td{border-bottom:1px solid var(--dsw-alias-border-l1);border-right:1px solid var(--dsw-alias-border-l1);padding:3px 8px;text-align:left;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;}',
+      '.dcr-datasetTable th{position:sticky;top:0;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-weight:600;}',
+      '.dcr-datasetTable tr:last-child td{border-bottom:0;}',
+      '.dcr-datasetImport{display:flex;flex-direction:column;gap:4px;}',
+      '.dcr-datasetCode{margin:0;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:' + MONO_FONT + ';font-size:11px;line-height:17px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:120px;overflow:auto;}',
+      '.dcr-datasetError{color:var(--dsw-alias-state-error-primary);}',
       // lightbox
       '.dcr-lightbox{position:absolute;inset:0;z-index:40;display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--dsw-alias-bg-overlay);}',
       '.dcr-lightboxHead{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px;color:var(--dsw-alias-label-primary);min-width:0;}',
@@ -3313,6 +3614,14 @@ window.__ModuleLoader__.load({
         h('path', { key: 'page', d: 'M2.5 1.5h4.5l2.5 2.5v6.5h-7z' }),
         h('path', { key: 'fold', d: 'M7 1.5v2.5h2.5' }),
         h('path', { key: 'lines', d: 'M4.2 6.2h3.6M4.2 8.2h2.6' }),
+      ])
+    }
+
+    function DatasetGlyph() {
+      return h('svg', { viewBox: '0 0 12 12', width: 12, height: 12, fill: 'none', stroke: 'currentColor', strokeWidth: 1.1, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false' }, [
+        h('ellipse', { key: 'top', cx: '6', cy: '3', rx: '3.6', ry: '1.4' }),
+        h('path', { key: 'left', d: 'M2.4 3v3c0 .8 1.6 1.4 3.6 1.4s3.6-.6 3.6-1.4V3' }),
+        h('path', { key: 'bottom', d: 'M2.4 6v3c0 .8 1.6 1.4 3.6 1.4s3.6-.6 3.6-1.4V6' }),
       ])
     }
 
@@ -3732,6 +4041,12 @@ window.__ModuleLoader__.load({
             disabled: !canExport,
             title: translate('export.button'),
           }, h(DocumentGlyph), exporting ? translate('export.running') : translate('export.button')),
+          h('button', {
+            type: 'button',
+            className: 'dcr-btn',
+            onClick: function onDataset() { actions.openDatasetDialog() },
+            title: translate('dataset.open'),
+          }, h(DatasetGlyph), translate('dataset.open')),
           mode === 'pane' ? h('span', { className: 'dcr-actions' }, h(HostChip, { t: translate, snapshot: snapshot })) : null),
         h('div', { className: 'dcr-toolbarRow' },
           h(LanguageField, { t: translate, snapshot: snapshot, actions: actions }),
@@ -4331,6 +4646,162 @@ window.__ModuleLoader__.load({
       }, rows)
     }
 
+    function DatasetDialog(props) {
+      const translate = props.t
+      const snapshot = props.snapshot
+      const actions = props.actions
+      const dialog = snapshot.datasetDialog
+      const preview = dialog.preview
+      const dirs = dialog.entries.filter(function onlyDirs(entry) { return entry.isDir === true })
+      const dataFiles = dialog.entries.filter(function onlyData(entry) { return entry.isDir !== true && isDatasetFileName(entry.name) })
+      const entries = []
+      for (const dir of dirs) {
+        entries.push(h('button', {
+          key: 'dir:' + dir.path,
+          type: 'button',
+          className: 'dcr-datasetEntry',
+          title: dir.path,
+          onClick: function onDir() { actions.selectDatasetEntry(dir) },
+        }, '📁 ' + dir.name))
+      }
+      for (const file of dataFiles) {
+        const active = dialog.path === file.path
+        entries.push(h('button', {
+          key: 'file:' + file.path,
+          type: 'button',
+          className: 'dcr-datasetEntry' + (active ? ' dcr-datasetEntryActive' : ''),
+          title: file.path,
+          'data-active': active ? 'true' : 'false',
+          onClick: function onFile() { actions.selectDatasetEntry(file) },
+        }, '📄 ' + file.name))
+      }
+      let previewNode = null
+      if (dialog.status === 'loading') {
+        previewNode = h('div', { className: 'dcr-dialogBody dcr-datasetLoading' }, translate('dataset.loading'))
+      } else if (dialog.status === 'error') {
+        const detail = dialog.error && dialog.error.message ? clampDetail(dialog.error.message) : ''
+        previewNode = h('div', { className: 'dcr-dialogBody dcr-datasetError' }, translate('dataset.failed', { detail: detail }))
+      } else if (preview) {
+        const headerChecked = dialog.header === null ? preview.header !== false : dialog.header === true
+        const headCells = preview.columns.map(function columnHead(column) {
+          return h('th', { key: column.index, title: column.name + ' · ' + column.type }, column.name)
+        })
+        const bodyRows = preview.rows.map(function bodyRow(row, rowIndex) {
+          return h('tr', { key: 'row-' + rowIndex }, preview.columns.map(function bodyCell(column) {
+            return h('td', { key: column.index }, row[column.index] === undefined ? '' : row[column.index])
+          }))
+        })
+        const controls = []
+        if (preview.sheets && preview.sheets.length > 1) {
+          controls.push(h('label', { key: 'sheet', className: 'dcr-inlineRow' },
+            h('span', { className: 'dcr-label' }, translate('dataset.sheet')),
+            h('select', {
+              id: 'dcr-dataset-sheet',
+              className: 'dcr-select',
+              value: preview.sheet || '',
+              onChange: function onSheet(event) { actions.setDatasetSheet(event.target.value) },
+            }, preview.sheets.map(function sheetOption(name) { return h('option', { key: name, value: name }, name) }))))
+        }
+        if (preview.sheets && preview.sheets.length === 1) {
+          controls.push(h('span', { key: 'onlySheet', className: 'dcr-dialogBody' }, translate('dataset.sheet') + '：' + preview.sheet))
+        }
+        if (preview.kind === 'csv' || preview.kind === 'tsv' || preview.kind === 'txt') {
+          controls.push(h('label', { key: 'delimiter', className: 'dcr-inlineRow' },
+            h('span', { className: 'dcr-label' }, translate('dataset.delimiter')),
+            h('select', {
+              id: 'dcr-dataset-delimiter',
+              className: 'dcr-select',
+              value: preview.delimiter || '',
+              onChange: function onDelimiter(event) { actions.setDatasetDelimiter(event.target.value) },
+            },
+              h('option', { value: '' }, translate('dataset.delimiterAuto')),
+              h('option', { value: ',' }, '， ,'),
+              h('option', { value: ';' }, '； ;'),
+              h('option', { value: '\t' }, translate('dataset.delimiterTab')),
+              h('option', { value: '|' }, '|'))))
+        }
+        const previewCode = preview.import && typeof preview.import.code === 'string' ? preview.import.code : ''
+        previewNode = h('div', { className: 'dcr-datasetPreview' },
+          h('div', { className: 'dcr-datasetControls' },
+            h('label', { className: 'dcr-exportCheck' },
+              h('input', {
+                id: 'dcr-dataset-header',
+                type: 'checkbox',
+                checked: headerChecked,
+                onChange: function onHeader() { actions.setDatasetHeader(!headerChecked) },
+              }),
+              h('span', null, translate('dataset.header'))),
+            controls),
+          h('div', { className: 'dcr-dialogBody dcr-datasetSummary' },
+            translate('dataset.summary', { rows: String(preview.totalRows), cols: String(preview.columns.length) }) +
+              (preview.truncated ? ' · ' + translate('dataset.truncated', { rows: String(preview.previewRows) }) : '')),
+          h('div', { className: 'dcr-datasetTableWrap' },
+            h('table', { className: 'dcr-datasetTable' },
+              h('thead', null, h('tr', null, headCells)),
+              h('tbody', null, bodyRows))),
+          h('div', { className: 'dcr-datasetImport' },
+            h('span', { className: 'dcr-label' }, translate('dataset.import', { language: snapshot.languageId })),
+            previewCode !== ''
+              ? h('pre', { className: 'dcr-datasetCode' }, previewCode)
+              : h('span', { className: 'dcr-dialogBody dcr-datasetNoImport' }, translate('dataset.unsupported')),
+            h('div', { className: 'dcr-dialogRow' },
+              previewCode !== ''
+                ? h('button', {
+                    type: 'button',
+                    className: 'dcr-btn dcr-btnPrimary',
+                    onClick: function onInsert() { actions.insertDatasetCode() },
+                  }, translate('dataset.insert'))
+                : null,
+              previewCode !== ''
+                ? h('button', {
+                    type: 'button',
+                    className: 'dcr-btn',
+                    onClick: function onCopy() { actions.copyDatasetCode() },
+                  }, translate('dataset.copy'))
+                : null)))
+      } else {
+        previewNode = h('div', { className: 'dcr-dialogBody dcr-datasetEmpty' }, translate('dataset.empty'))
+      }
+      return h('div', { key: 'dataset', className: 'dcr-inlineDialog dcr-datasetDialog', role: 'dialog', 'aria-label': translate('dataset.dialogTitle') },
+        h('span', { className: 'dcr-dialogTitle' }, translate('dataset.dialogTitle')),
+        h('div', { className: 'dcr-dialogRow dcr-exportField' },
+          h('label', { className: 'dcr-label', htmlFor: 'dcr-dataset-path' }, translate('dataset.path')),
+          h('input', {
+            id: 'dcr-dataset-path',
+            className: 'dcr-input dcr-datasetPath',
+            type: 'text',
+            value: dialog.path,
+            placeholder: translate('dataset.pathPlaceholder'),
+            spellCheck: false,
+            autoComplete: 'off',
+            autoCorrect: 'off',
+            onChange: function onPathInput(event) { actions.setDatasetPath(event.target.value) },
+            onKeyDown: function onPathKey(event) {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                actions.readDatasetPath()
+              }
+            },
+          }),
+          h('button', { type: 'button', className: 'dcr-btn', onClick: function onRead() { actions.readDatasetPath() } }, translate('dataset.read'))),
+        h('div', { className: 'dcr-datasetBrowse' },
+          h('div', { className: 'dcr-dialogRow dcr-datasetBrowseHead' },
+            h('span', { className: 'dcr-label dcr-datasetDir' }, translate('dataset.browseDir') + '：' + (dialog.browseDir || '—')),
+            h('button', { type: 'button', className: 'dcr-btn dcr-btnSmall', onClick: function onUp() { actions.datasetUp() } }, translate('dataset.up')),
+            h('button', {
+              type: 'button',
+              className: 'dcr-btn dcr-btnSmall',
+              disabled: dialog.entriesStatus === 'loading',
+              onClick: function onRefresh() { actions.refreshDatasetEntries() },
+            }, translate('dataset.refresh'))),
+          entries.length > 0
+            ? h('div', { className: 'dcr-datasetFiles' }, entries)
+            : h('span', { className: 'dcr-dialogBody dcr-datasetNoFiles' }, translate('dataset.noDataFiles'))),
+        previewNode,
+        h('div', { className: 'dcr-dialogRow' },
+          h('button', { type: 'button', className: 'dcr-btn', onClick: function onClose() { actions.closeDatasetDialog() } }, translate('dataset.close'))))
+    }
+
     function SurfaceDialogs(props) {
       const translate = props.t
       const snapshot = props.snapshot
@@ -4342,6 +4813,8 @@ window.__ModuleLoader__.load({
       if (snapshot.exportDialog && snapshot.exportDialog.open) {
         const options = snapshot.exportDialog
         const include = options.include
+        const placement = options.plotPlacement === 'under-code' ? 'under-code' : 'section'
+        const placementDisabled = include.plots === false || snapshot.plots.items.length === 0
         const stem = snapshot.filePath !== null
           ? String(basename(snapshot.filePath)).replace(/\.[^.]+$/, '')
           : '未命名'
@@ -4377,11 +4850,32 @@ window.__ModuleLoader__.load({
               toggleRow('output', translate('export.includeOutput'), false),
               toggleRow('plots', translate('export.includePlots'), snapshot.plots.items.length === 0),
               toggleRow('summary', translate('export.includeSummary'), false))),
+          h('div', { className: 'dcr-dialogRow dcr-exportField' },
+            h('label', { className: 'dcr-label', htmlFor: 'dcr-export-placement' }, translate('export.plotPlacement')),
+            h('select', {
+              id: 'dcr-export-placement',
+              className: 'dcr-select',
+              value: placement,
+              disabled: placementDisabled,
+              title: placementDisabled ? translate('export.noPlots') : undefined,
+              onChange: function onPlacement(event) { actions.setExportPlotPlacement(event.target.value) },
+            },
+              h('option', { value: 'section' }, translate('export.plotPlacementSection')),
+              h('option', { value: 'under-code' }, translate('export.plotPlacementUnderCode')))),
+          h('div', { className: 'dcr-dialogBody dcr-exportPlacementHint' },
+            placementDisabled
+              ? translate('export.noPlots')
+              : placement === 'under-code'
+                ? translate('export.plotPlacementUnderCodeHint')
+                : translate('export.plotPlacementSectionHint')),
           h('div', { className: 'dcr-dialogBody dcr-exportName' },
             translate('export.name') + '：' + stem + '实验报告' + suffix),
           h('div', { className: 'dcr-dialogRow' },
             h('button', { type: 'button', className: 'dcr-btn', onClick: function onCancelExport() { actions.closeExportDialog() } }, translate('export.cancel')),
             h('button', { type: 'button', className: 'dcr-btn dcr-btnPrimary', onClick: function onStartExport() { actions.exportReport() } }, translate('export.start')))))
+      }
+      if (snapshot.datasetDialog && snapshot.datasetDialog.open) {
+        dialogs.push(h(DatasetDialog, { key: 'dataset', t: translate, snapshot: snapshot, actions: actions }))
       }
       if (snapshot.packsOpen) {
         const packsState = snapshot.packs || { status: 'idle', items: [], error: null }
